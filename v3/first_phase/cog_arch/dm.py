@@ -92,6 +92,14 @@ class RMSNorm(torch.nn.Module):
         return output * self.weight
 
 
+
+
+
+
+
+
+
+
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
@@ -108,15 +116,21 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     Returns:
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
 
-    
-        
-
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
+
+
+
+
+
+
+
+
+
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
@@ -142,6 +156,12 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(*shape)
+
+
+
+
+
+
 
 
 def apply_rotary_emb(
@@ -176,6 +196,11 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
+
+
+
+
+
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
     bs, slen, n_kv_heads, head_dim = x.shape
@@ -187,8 +212,16 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
+
+
+
+
+
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+
+
 
 
 
@@ -515,7 +548,9 @@ class AdaLNTransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
+
         self.attention = Attention(args)
+
         self.feed_forward = FeedForward(
             dim=args.dim,
             ffn_dim_multiplier=args.ffn_dim_multiplier,
@@ -523,8 +558,10 @@ class AdaLNTransformerBlock(nn.Module):
             weight_initialization_gain=args.weight_initialization_gain
         )
         self.layer_id = layer_id
+
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
             nn.Linear(self.dim, 6 * self.dim, bias=True)
