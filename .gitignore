@@ -1,0 +1,66 @@
+/target
+
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Weights and Biases (or other logging) directory
+wandb/
+
+# Data folders and large files - NEVER VERSION CONTROL DATA
+!cog_arch/data/
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.tar
+*.zip
+
+# Training outputs and checkpoints (they are large and can be reproduced)
+outputs/
+experiments/
+logs/
+
+
+# Exception: you might want to keep a small sample data folder for testing, but never the full dataset.
+# !data/sample/
+
+
+notebooks/v3/first_phase/data/processed/*
+notebooks/v3/first_phase/data/raw/*
+
+
+
+
+
+
+
+
+# Ignorar carpeta others
+/others/
+
