@@ -136,6 +136,7 @@ def run(
     # Load datasets
     train_set = MovingMNISTDet(split="train")
     val_set = MovingMNISTDet(split="val")
+
     train_loader = DataLoader(
         train_set,
         batch_size=cfg.data.batch_size,
@@ -148,6 +149,8 @@ def run(
         shuffle=False,
         num_workers=cfg.data.num_workers,
     )
+
+
     log_data_info(
         "MovingMNIST",
         len(train_loader),
@@ -171,8 +174,11 @@ def run(
     predictor_model = ResUNet(2 * cfg.model.dstc, cfg.model.hpre, cfg.model.dstc)
     predictor = StateOnlyPredictor(predictor_model, context_length=2)
     projector = Projector(f"{cfg.model.dstc}-{cfg.model.dstc*4}-{cfg.model.dstc*4}")
+
+
     regularizer = VCLoss(cfg.loss.std_coeff, cfg.loss.cov_coeff, proj=projector)
     ploss = SquareLossSeq(projector)
+
     jepa = JEPA(encoder, encoder, predictor, regularizer, ploss).to(device)
 
 
@@ -325,6 +331,9 @@ def run(
                 },
                 total_epochs=cfg.optim.epochs,
             )
+
+
+
 
         # Save checkpoint
         save_checkpoint(
