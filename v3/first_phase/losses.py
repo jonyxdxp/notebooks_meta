@@ -1,5 +1,10 @@
 
+
 # (Losses and Regularization ("retention" in Cognitive terms))
+
+
+# will also be the "Energy Function" for our EBM, since we will be training the EBM to minimize this loss function, so the loss function is effectively the energy function that the EBM is modeling. 
+# The EBM will learn to assign low energy (loss) to good reconstructions and high energy (loss) to bad reconstructions, thus learning a landscape of the loss function.
 
 
 

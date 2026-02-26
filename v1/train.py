@@ -138,7 +138,13 @@ def _main(cfg: Config) -> None:
 
     checkpointer = Checkpointer(config=cfg, for_saving=True)
 
+
+    # interesante:
+
     optimizer_outer_loop, optimizer_info_outer_loop = make_optimizer(cfg.training.optimizer_outer)
+
+
+
 
     model_sharding = ModelSharding(cfg)
     mesh = model_sharding.mesh
@@ -153,6 +159,12 @@ def _main(cfg: Config) -> None:
         state = jax.device_put(state, jax.NamedSharding(mesh, P()))  # Replicate initial (empty) state
         model = model_sharding.shard_params(model)
         return model, state
+
+
+
+
+
+
 
     @eqx.filter_jit
     def create_stepped_opt_state(model: MetaModel) -> OptState:
@@ -220,6 +232,13 @@ def _main(cfg: Config) -> None:
         model, state = create_sharded_model_and_state()
         opt_state = optimizer_outer_loop.init(model.trainable_parameters())  # Sharding taken from model
         start_step = 0
+
+
+
+
+
+
+
 
     ### Include Storage
     num_trainable_params = sum(x.size for x in jax.tree_util.tree_leaves(model.trainable_parameters()))
