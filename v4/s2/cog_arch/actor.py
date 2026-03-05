@@ -74,6 +74,12 @@ class Actor(nn.Module):
         x = self.output_proj(x.squeeze(1))    # (B, D)
         return self.norm(x)                   # (B, D)
 
+
+
+
+
+
+
     def __repr__(self):
         total = sum(p.numel() for p in self.parameters())
         return (
