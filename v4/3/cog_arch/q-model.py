@@ -1,7 +1,5 @@
 
-
-# GRPO (?)
-
+# from https://github.com/YyzHarry/SV-RL/blob/master/sv_rl/dqn_model.py
 
 
 
@@ -10,66 +8,77 @@
 
 
 
-
-# This implementation is based on the paper: https://github.com/deepseek-ai/DeepSeek-R1/blob/main/DeepSeek_R1.pdf
-#
-# pip install torch transformers
-# python grpo_demo.py
-
-import torch
 import torch.nn as nn
-import torch.optim as optim
-from transformers import BertTokenizer, BertModel
-
-# GRPO Configuration parameters as per formula
-G = 4  # Number of samples in the group (G in the formula)
-epsilon = 0.15  # ε in the formula - Clipping limit
-beta = 0.0005  # β in the formula - KL penalty weight
-learning_rate = 0.001
-
-# Example data - Simulating a single q from distribution P(Q)
-question = "What is the capital of Brazil?"
-possible_answers = ["Brasília", "Rio de Janeiro", "São Paulo", "Fortaleza"]
-correct_answer_idx = 0  # Brasília
-
-# Preprocessing with BERT to get input representations
-tokenizer = BertTokenizer.from_pretrained("neuralmind/bert-base-portuguese-cased")
-model = BertModel.from_pretrained("neuralmind/bert-base-portuguese-cased")
+import torch.nn.functional as F
 
 
-def get_embedding(text):
-    """Convert text to embedding using BERT"""
-    inputs = tokenizer(
-        text, return_tensors="pt", padding=True, truncation=True, max_length=512
-    )
-    outputs = model(**inputs)
-    return outputs.last_hidden_state.mean(dim=1).detach()
+class DQN(nn.Module):
 
-
-question_embedding = get_embedding(question)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Policy Model (π_θ in the formula)
-class PolicyModel(nn.Module):
-    def __init__(self, num_actions, embedding_dim=768):
-        super().__init__()
-        self.fc = nn.Linear(embedding_dim, num_actions)
+    def __init__(self, in_channels=4, num_actions=18):
+        super(DQN, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, 32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1)
+        self.fc4 = nn.Linear(7 * 7 * 64, 512)
+        self.fc5 = nn.Linear(512, num_actions)
 
     def forward(self, x):
-        # Returns π_θ(o|q) - action probabilities given the state
-        return torch.softmax(self.fc(x), dim=-1)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = F.relu(self.fc4(x.view(x.size(0), -1)))
+        return self.fc5(x)
+
+
+class DQN_RAM(nn.Module):
+
+    def __init__(self, in_features=4, num_actions=18):
+        super(DQN_RAM, self).__init__()
+        self.fc1 = nn.Linear(in_features, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, 64)
+        self.fc4 = nn.Linear(64, num_actions)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return self.fc4(x)
+
+
+class Dueling_DQN(nn.Module):
+
+    def __init__(self, in_channels=4, num_actions=18):
+        super(Dueling_DQN, self).__init__()
+        self.num_actions = num_actions
+
+        self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=32, kernel_size=8, stride=4)
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2)
+        self.conv3 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1)
+
+        self.fc1_adv = nn.Linear(in_features=7 * 7 * 64, out_features=512)
+        self.fc1_val = nn.Linear(in_features=7 * 7 * 64, out_features=512)
+
+        self.fc2_adv = nn.Linear(in_features=512, out_features=num_actions)
+        self.fc2_val = nn.Linear(in_features=512, out_features=1)
+
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(x))
+        x = x.view(x.size(0), -1)
+
+        adv = self.relu(self.fc1_adv(x))
+        val = self.relu(self.fc1_val(x))
+
+        adv = self.fc2_adv(adv)
+        val = self.fc2_val(val).expand(x.size(0), self.num_actions)
+
+        x = val + adv - adv.mean(1).unsqueeze(1).expand(x.size(0), self.num_actions)
+        return x
 
 
 
@@ -79,91 +88,215 @@ class PolicyModel(nn.Module):
 
 
 
-# Initialize π_θ (current policy) and π_θ_old (old policy)
-num_actions = len(possible_answers)
-policy = PolicyModel(num_actions)  # π_θ in the formula
-old_policy = PolicyModel(num_actions)  # π_θ_old in the formula
-old_policy.load_state_dict(policy.state_dict())
 
 
-def train_step():
+
+
+# ------------------------------------------------------
+
+
+
+
+
+
+
+
+
+class QNetwork(nn.Module):
+    """Q-network with configurable hidden dimensions for scaling studies"""
+    
+    def __init__(self, state_dim: int, action_dim: int, hidden_dims: list = [256, 256]):
+        super().__init__()
+        
+        layers = []
+        input_dim = state_dim + action_dim
+        
+        for hidden_dim in hidden_dims:
+            layers.extend([
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(),
+            ])
+            input_dim = hidden_dim
+            
+        layers.append(nn.Linear(input_dim, 1))
+        self.network = nn.Sequential(*layers)
+        
+        # Initialize weights
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                nn.init.constant_(m.bias, 0)
+    
+    def forward(self, state, action):
+        x = torch.cat([state, action], dim=-1)
+        return self.network(x)
+
+
+class SACAgent:
     """
-    Implements one optimization step of GRPO according to the formula:
-    J_GRPO(θ) = E[...] 1/G ∑(min(π_θ/π_θ_old * A_i, clip(π_θ/π_θ_old, 1-ε, 1+ε) * A_i))
+    Soft Actor-Critic implementation with predictable scaling support.
+    
+    This follows the "Value-Based Deep RL Scales Predictably" methodology:
+    1. UTD ratio controls the tradeoff between data and compute
+    2. Hyperparameters scale predictably with UTD to maintain stability
+    3. Supports model size scaling alongside UTD scaling
     """
-    # 1. Sample G outputs from old policy π_θ_old
-    with torch.no_grad():
-        probs_old = old_policy(question_embedding)
-        sampled_actions = torch.multinomial(probs_old.squeeze(), G, replacement=True)
-
-    # 2. Calculate probabilities from new policy π_θ
-    probs_new = policy(question_embedding)
-
-    # 3. Calculate ratio π_θ/π_θ_old
-    ratios = probs_new[0, sampled_actions] / probs_old[0, sampled_actions]
-
-    # 4. Calculate rewards and advantages (A_i in the formula)
-    rewards = torch.tensor(
-        [1.0 if idx == correct_answer_idx else -0.1 for idx in sampled_actions]
-    )
-    # A_i = (r_i - mean({r_1,...,r_G})) / std({r_1,...,r_G})
-    advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-
-    # 5. Implement clipping as per formula
-    clipped_ratios = torch.clamp(ratios, 1 - epsilon, 1 + epsilon)
-
-    # 6. Calculate loss according to min(.) in formula
-    loss_policy = -torch.min(ratios * advantages, clipped_ratios * advantages).mean()
-
-    # 7. Calculate KL divergence as per formula (2)
-    # D_KL(π_θ||π_ref) = π_ref(o_i|q)/π_θ(o_i|q) - log(π_ref(o_i|q)/π_θ(o_i|q)) - 1
-    ratio_kl = probs_old.detach() / probs_new
-    kl_penalty = (ratio_kl - torch.log(ratio_kl) - 1).mean()
-
-    # 8. Total loss with KL penalty
-    total_loss = loss_policy + beta * kl_penalty
-
-    # 9. Update policy
-    optimizer = optim.Adam(policy.parameters(), lr=learning_rate)
-    optimizer.zero_grad()
-    total_loss.backward()
-    optimizer.step()
-
-    return total_loss, loss_policy, kl_penalty
-
-
-# Train the model
-print("Starting training...")
-for epoch in range(100):
-    loss, policy_loss, kl = train_step()
-    if (epoch + 1) % 10 == 0:
-        print(f"Epoch {epoch + 1}")
-        print(f"  Total Loss: {loss.item():.4f}")
-        print(f"  Policy Loss: {policy_loss.item():.4f}")
-        print(f"  KL Divergence: {kl.item():.4f}")
-
-# Test the trained policy
-with torch.no_grad():
-    probs_final = policy(question_embedding)
-    predicted_answer_idx = torch.argmax(probs_final).item()
-    probabilities = probs_final[0].numpy()
-
-print("\nFinal Results:")
-print(f"Predicted answer: '{possible_answers[predicted_answer_idx]}'")
-print("\nProbabilities for each answer:")
-for answer, prob in zip(possible_answers, probabilities):
-    print(f"{answer}: {prob:.4f}")
-
-
-
-
-
-
-
-
-
-
-
+    
+    def __init__(self,
+                 state_dim: int,
+                 action_dim: int,
+                 scaling_laws: ScalingLaws,
+                 hidden_dims: list = [256, 256],
+                 gamma: float = 0.99,
+                 tau: float = 0.005,
+                 alpha: float = 0.2,  # Temperature for entropy regularization
+                 device: str = 'cpu',
+                 automatic_entropy_tuning: bool = True,
+                 target_entropy: Optional[float] = None):
+        
+        self.device = device
+        self.scaling = scaling_laws
+        self.gamma = gamma
+        self.tau = tau
+        self.automatic_entropy_tuning = automatic_entropy_tuning
+        
+        # Get scaled hyperparameters based on current UTD
+        hparams = scaling_laws.compute_hyperparameters()
+        self.batch_size = hparams['batch_size']
+        self.lr = hparams['learning_rate']
+        self.target_update_freq = hparams['target_update_freq']
+        self.utd = hparams['utd_ratio']
+        
+        # Networks
+        self.critic1 = QNetwork(state_dim, action_dim, hidden_dims).to(device)
+        self.critic2 = QNetwork(state_dim, action_dim, hidden_dims).to(device)
+        self.critic1_target = QNetwork(state_dim, action_dim, hidden_dims).to(device)
+        self.critic2_target = QNetwork(state_dim, action_dim, hidden_dims).to(device)
+        
+        self.critic1_target.load_state_dict(self.critic1.state_dict())
+        self.critic2_target.load_state_dict(self.critic2.state_dict())
+        
+        # Policy network (Gaussian policy)
+        self.policy = GaussianPolicy(state_dim, action_dim, hidden_dims).to(device)
+        
+        # Optimizers with scaled learning rate
+        self.critic1_optimizer = Adam(self.critic1.parameters(), lr=self.lr)
+        self.critic2_optimizer = Adam(self.critic2.parameters(), lr=self.lr)
+        self.policy_optimizer = Adam(self.policy.parameters(), lr=self.lr)
+        
+        # Entropy temperature
+        if self.automatic_entropy_tuning:
+            if target_entropy is None:
+                self.target_entropy = -action_dim
+            else:
+                self.target_entropy = target_entropy
+            self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+            self.alpha_optimizer = Adam([self.log_alpha], lr=self.lr)
+            self.alpha = self.log_alpha.exp()
+        else:
+            self.alpha = alpha
+            
+        self.update_counter = 0
+        
+    def select_action(self, state, evaluate=False):
+        state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        if evaluate:
+            _, _, action = self.policy.sample(state)
+        else:
+            action, _, _ = self.policy.sample(state)
+        return action.detach().cpu().numpy()[0]
+    
+    def update(self, replay_buffer: ReplayBuffer):
+        """
+        Perform UTD ratio number of updates per call.
+        
+        This is the key to the scaling behavior: we can vary the amount of compute
+        per environment step while maintaining performance through hyperparameter
+        scaling.
+        """
+        if len(replay_buffer) < self.batch_size:
+            return {}
+        
+        metrics = {
+            'critic_loss': 0,
+            'policy_loss': 0,
+            'alpha_loss': 0,
+            'alpha': self.alpha.item() if isinstance(self.alpha, torch.Tensor) else self.alpha
+        }
+        
+        # Perform UTD updates
+        for _ in range(int(self.utd)):
+            # Sample batch
+            state, action, reward, next_state, done = replay_buffer.sample(self.batch_size)
+            
+            with torch.no_grad():
+                # Target Q-value
+                next_action, next_log_prob, _ = self.policy.sample(next_state)
+                target_q1 = self.critic1_target(next_state, next_action)
+                target_q2 = self.critic2_target(next_state, next_action)
+                target_q = torch.min(target_q1, target_q2) - self.alpha * next_log_prob
+                target_q = reward + (1 - done) * self.gamma * target_q
+            
+            # Current Q-values
+            current_q1 = self.critic1(state, action)
+            current_q2 = self.critic2(state, action)
+            
+            # Critic loss
+            critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
+            
+            # Update critics
+            self.critic1_optimizer.zero_grad()
+            self.critic2_optimizer.zero_grad()
+            critic_loss.backward()
+            self.critic1_optimizer.step()
+            self.critic2_optimizer.step()
+            
+            metrics['critic_loss'] += critic_loss.item()
+            
+            # Policy update (less frequent for computational efficiency)
+            if self.update_counter % 2 == 0:
+                pi, log_pi, _ = self.policy.sample(state)
+                q1_pi = self.critic1(state, pi)
+                q2_pi = self.critic2(state, pi)
+                min_q_pi = torch.min(q1_pi, q2_pi)
+                
+                policy_loss = ((self.alpha * log_pi) - min_q_pi).mean()
+                
+                self.policy_optimizer.zero_grad()
+                policy_loss.backward()
+                self.policy_optimizer.step()
+                
+                metrics['policy_loss'] += policy_loss.item()
+                
+                # Update temperature
+                if self.automatic_entropy_tuning:
+                    alpha_loss = -(self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
+                    
+                    self.alpha_optimizer.zero_grad()
+                    alpha_loss.backward()
+                    self.alpha_optimizer.step()
+                    
+                    self.alpha = self.log_alpha.exp()
+                    metrics['alpha'] = self.alpha.item()
+                    metrics['alpha_loss'] += alpha_loss.item()
+            
+            # Soft update target networks (frequency scaled by UTD)
+            if self.update_counter % self.target_update_freq == 0:
+                self._soft_update(self.critic1, self.critic1_target)
+                self._soft_update(self.critic2, self.critic2_target)
+            
+            self.update_counter += 1
+        
+        # Average losses over UTD updates
+        for key in metrics:
+            if 'loss' in key:
+                metrics[key] /= self.utd
+                
+        return metrics
+    
+    def _soft_update(self, source, target):
+        for target_param, param in zip(target.parameters(), source.parameters()):
+            target_param.data.copy_(target_param.data * (1.0 - self.tau) + param.data * self.tau)
 
 
 

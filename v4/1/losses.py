@@ -25,14 +25,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def sq_loss(x, y, reduction="mean"):
-    """Simple square loss (MSE)."""
-    return nn.functional.mse_loss(x, y, reduction=reduction)
-
-
-def square_cost_seq(state, predi):
-    """Square loss between two [B, C, T, H, W] sequences."""
-    return sq_loss(state, predi)
 
 
 
@@ -40,53 +32,7 @@ def square_cost_seq(state, predi):
 
 
 
-class SquareLossSeq(nn.Module):
-    """Square loss over a sequence [B, C, T, H, W] (feature dim at dim 1)."""
-
-    def __init__(self, proj=None):
-        super().__init__()
-        self.proj = nn.Identity() if proj is None else proj
-
-    def forward(self, state, predi):
-        state = self.proj(state.transpose(0, 1).flatten(1).transpose(0, 1))
-        predi = self.proj(predi.transpose(0, 1).flatten(1).transpose(0, 1))
-        return square_cost_seq(state, predi)
-
-
-
-
-
-
-class VCLoss(nn.Module):
-    """Variance-Covariance loss attracting means to zero and covariance to identity."""
-
-    def __init__(self, std_coeff, cov_coeff, proj=None):
-        super().__init__()
-        self.std_coeff = std_coeff
-        self.cov_coeff = cov_coeff
-        self.proj = nn.Identity() if proj is None else proj
-        self.std_loss_fn = HingeStdLoss(std_margin=1.0)
-        self.cov_loss_fn = CovarianceLoss()
-
-    def forward(self, x, actions=None):
-        x = x.transpose(0, 1).flatten(1).transpose(0, 1)  # [B*T*H*W, C]
-        fx = self.proj(x)  # [B*T*H*W, C']
-
-        std_loss = self.std_loss_fn(fx)
-        cov_loss = self.cov_loss_fn(fx)
-
-        loss = self.std_coeff * std_loss + self.cov_coeff * cov_loss
-        total_unweighted_loss = std_loss + cov_loss
-        loss_dict = {
-            "std_loss": std_loss.item(),
-            "cov_loss": cov_loss.item(),
-        }
-        return loss, total_unweighted_loss, loss_dict
-
-
-
-
-
+# VICReg
 
 
 class HingeStdLoss(torch.nn.Module):
@@ -157,214 +103,6 @@ class CovarianceLoss(torch.nn.Module):
 
 
 
-class TemporalSimilarityLoss(torch.nn.Module):
-    def __init__(self):
-        """
-        Temporal Similarity Loss.
-        Encourages consecutive frames to have similar representations by penalizing
-        the squared difference between consecutive time steps.
-        """
-        super().__init__()
-
-    def forward(self, x: torch.Tensor):
-        """
-        Args:
-            x: [T, N, D] where T is time steps, N is batch size, D is feature dimension
-        """
-        if x.shape[0] <= 1:
-            return torch.tensor(0.0, device=x.device)
-        sim_loss_t = (x[1:] - x[:-1]).pow(2).mean()
-        return sim_loss_t
-
-
-
-
-
-
-
-class InverseDynamicsLoss(torch.nn.Module):
-    def __init__(self, idm: nn.Module):
-        """
-        Predicts actions from consecutive states and compares with ground truth actions.
-        Args:
-            idm (nn.Module): Inverse dynamics model that takes (state_t, state_t+1) and predicts action
-        """
-        super().__init__()
-        self.idm = idm
-
-    def forward(self, x: torch.Tensor, actions: torch.Tensor):
-        """
-        Args:
-            x: [T, B, D] - States across time steps
-            actions: [B, A, T] - Ground truth actions between consecutive states
-        """
-        if x.shape[0] <= 1 or actions is None:
-            return torch.tensor(0.0, device=x.device)
-
-        t, b, d = x.shape
-
-        states_t = x[:-1].transpose(0, 1)  # [B, T-1, D]
-        states_t_plus_1 = x[1:].transpose(0, 1)  # [B, T-1, D]
-
-        states_t_flat = states_t.reshape(-1, d)  # [B*(T-1), D]
-        states_t_plus_1_flat = states_t_plus_1.reshape(-1, d)  # [B*(T-1), D]
-
-        pred_actions = self.idm(states_t_flat, states_t_plus_1_flat)  # [B*(T-1), A]
-        target_actions = actions.transpose(1, 2)[:, :-1].reshape(
-            -1, actions.size(1)
-        )  # [B*(T-1), A]
-        idm_loss = F.mse_loss(pred_actions, target_actions)
-
-        return idm_loss
-
-
-
-
-
-
-
-class VC_IDM_Sim_Regularizer(torch.nn.Module):
-    def __init__(
-        self,
-        cov_coeff: float,
-        std_coeff: float,
-        sim_coeff_t: float,
-        idm_coeff: float = 0.0,
-        idm: nn.Module = None,
-        std_margin: float = 1,
-        first_t_only: bool = True,
-        projector: nn.Module = None,
-        spatial_as_samples: bool = False,
-        sim_t_after_proj: bool = False,
-        idm_after_proj: bool = False,
-    ):
-        """
-        Composite Regularizer combining multiple losses
-
-        This is a composite loss that combines:
-        - Hinge Standard Deviation Loss
-        - Covariance Decorrelation Loss
-        - Temporal Similarity Loss
-        - Inverse Dynamics Model Loss
-
-        Args:
-            cov_coeff (float): Weight for covariance loss
-            std_coeff (float): Weight for std hinge loss
-            sim_coeff_t (float): Weight for temporal similarity loss
-            idm_coeff (float): Weight for inverse dynamics loss
-            idm (nn.Module): Inverse dynamics model
-            std_margin (float): Minimum desired std per feature
-            first_t_only (bool): Use only first time slice for std/cov loss
-            projector (nn.Module): Optional projection layer
-            spatial_as_samples (bool): Treat spatial locations as samples
-            sim_t_after_proj (bool): Apply temporal loss after projection
-            idm_after_proj (bool): Apply IDM loss after projection
-        """
-        super().__init__()
-        self.cov_coeff = cov_coeff
-        self.std_coeff = std_coeff
-        self.sim_coeff_t = sim_coeff_t
-        self.idm_coeff = idm_coeff
-
-        self.first_t_only = first_t_only
-        self.projector = nn.Identity() if projector is None else projector
-        self.spatial_as_samples = spatial_as_samples
-        self.sim_t_after_proj = sim_t_after_proj
-        self.idm_after_proj = idm_after_proj
-
-        # Initialize individual loss components
-        self.std_loss_fn = HingeStdLoss(std_margin=std_margin)
-        self.cov_loss_fn = CovarianceLoss()
-        self.sim_loss_fn = TemporalSimilarityLoss()
-        self.idm_loss_fn = InverseDynamicsLoss(idm) if idm is not None else None
-
-    def forward(self, x, actions=None):
-        """
-        Args:
-            x: [B, C, T, H, W] - Input activations. Internally reshaped to either
-                [1, B, D] when first_t_only=True or [T*B, D] otherwise, with D=C*H*W.
-            actions: [B, A, T] - Optional actions for IDM loss
-        """
-        b, c, t, h, w = x.shape
-
-        # divergent gradient paths for x_unprojected and x_projected
-        x_unprojected = x.permute(2, 0, 1, 3, 4).reshape(t, b, -1)  # [T, B, C*H*W]
-
-        x_flat = x.permute(0, 2, 3, 4, 1).reshape(-1, c)  # [B*T*H*W, C]
-        x_proj = self.projector(x_flat)  # [B*T*H*W, C_out]
-        c_out = x_proj.shape[-1]
-        x_projected = x_proj.view(b, t, h, w, c_out)  # [B, T, H, W, C_out]
-        x_projected_reshaped = x_projected.permute(2, 0, 1, 3, 4).reshape(
-            t, b, -1
-        )  # [T, B, C_out*H*W]
-
-        # SIM_T LOSS
-        if self.sim_t_after_proj:
-            sim_loss_t = self.sim_loss_fn(x_projected_reshaped)
-        else:
-            sim_loss_t = self.sim_loss_fn(x_unprojected)
-
-        # IDM LOSS
-        idm_loss = torch.tensor(0.0, device=x.device)
-        if self.idm_coeff > 0 and self.idm_loss_fn is not None and actions is not None:
-            if self.idm_after_proj:
-                idm_loss = self.idm_loss_fn(x_projected_reshaped, actions)
-            else:
-                idm_loss = self.idm_loss_fn(x_unprojected, actions)
-
-        # STD and COV LOSS
-        if self.spatial_as_samples:
-            if self.first_t_only:
-                # Use only first time: [B*H*W, C_out]
-                x_for_vc = x_projected[:, 0].reshape(b * h * w, c_out)
-                assert x_for_vc.shape == (b * h * w, c_out)
-            else:
-                # Use all times: [B*T*H*W, C_out]
-                x_for_vc = x_projected.reshape(-1, c_out)
-                assert x_for_vc.shape == (b * t * h * w, c_out)
-        else:
-            x_for_vc = x_projected.permute(0, 1, 4, 2, 3).reshape(
-                b, t, -1
-            )  # [B, T, C_out*H*W]
-            if self.first_t_only:
-                # Use only first time: [B, C_out*H*W]
-                x_for_vc = x_for_vc[:, 0]
-                assert x_for_vc.shape == (b, c_out * h * w)
-            else:
-                # Use all times: [B*T, C_out*H*W]
-                x_for_vc = x_for_vc.reshape(-1, x_for_vc.size(-1))
-                assert x_for_vc.shape == (b * t, c_out * h * w)
-        # [B*T, C_out*H*W] if first_t_only=False and spatial_as_samples=False
-        # or [B, C_out*H*W] if first_t_only=True and spatial_as_samples=False
-        # or [B*H*W, C_out] if first_t_only=True spatial_as_samples=True
-        # or [B*T*H*W, C_out] if first_t_only=False spatial_as_samples=True
-        std_loss = self.std_loss_fn(x_for_vc)
-        cov_loss = self.cov_loss_fn(x_for_vc)
-
-        total_weighted_loss = (
-            self.cov_coeff * cov_loss
-            + self.std_coeff * std_loss
-            + self.sim_coeff_t * sim_loss_t
-            + self.idm_coeff * idm_loss
-        )
-        total_unweighted_loss = cov_loss + std_loss + sim_loss_t + idm_loss
-
-        loss_dict = {
-            "cov_loss": cov_loss.item(),
-            "std_loss": std_loss.item(),
-            "sim_loss_t": sim_loss_t.item(),
-            "idm_loss": idm_loss if isinstance(idm_loss, float) else idm_loss.item(),
-        }
-
-        return total_weighted_loss, total_unweighted_loss, loss_dict
-
-
-
-
-
-
-
-
 
 class VICRegLoss(nn.Module):
     """VICReg loss combining invariance, variance (std), and covariance terms."""
@@ -413,7 +151,7 @@ class VICRegLoss(nn.Module):
 
 
 
-######################################################
+
 # BCS (Batched Characteristic Slicing) loss for SIGReg
 
 
@@ -507,12 +245,7 @@ class BCS(nn.Module):
 
 
 
-# from https://github.com/galilai-group/llm-jepa/blob/main/finetune.py
-
-
-
-
-# LLM-JEPA LOSS
+# from https://github.com/YilunKuang/rectified-lp-jepa/blob/main/solo/losses/vicreg.py
 
 
 
@@ -521,235 +254,138 @@ class BCS(nn.Module):
 
 
 
-# class RepresentationTrainer(Trainer):
-#     """
-#     Trainer to regularize representations.
-#     """
-    
-#     def __init__(self, *args, **kwargs):
-#         # Extract custom loss parameters
-#         self.lbd = kwargs.pop('lbd', 1.0)
-#         self.gamma = kwargs.pop('gamma', 1.0)
-#         self.last_token = kwargs.pop('last_token', -2)
-#         self.debug = kwargs.pop('debug', 0)
-#         self.additive_mask = kwargs.pop('additive_mask', False)
-#         self.jepa_l2 = kwargs.pop('jepa_l2', False)
-#         self.jepa_mse = kwargs.pop('jepa_mse', False)
-#         self.infonce = kwargs.pop('infonce', False)
-#         self.jepa_ratio = kwargs.pop('jepa_ratio', -1.0)
-#         assert self.jepa_l2 + self.jepa_mse <= 1, "Only one of jepa_l2 and jepa_mse can be True."
-#         super().__init__(*args, **kwargs)
-    
-#     def _last_token_index(self, input_ids, labels, attention_mask):
-#         index = []
-#         def unpad(input_ids, attention_mask):
-#             result = []
-#             can_break = False
-#             for id, mask in zip(input_ids, attention_mask):
-#                 if mask != 0:
-#                     can_break = True
-#                 if mask == 0 and can_break:
-#                     break
-#                 result.append(id)
-#             return result
 
-#         for i in range(input_ids.shape[0]):
-#             uii = unpad(input_ids[i], attention_mask[i])
-#             if self.debug == 1 and torch.cuda.current_device() == 0:
-#                 print(f"====={len(uii)}=====")
-#                 print(input_ids[i][len(uii) - 4], input_ids[i][len(uii) - 3], input_ids[i][len(uii) - 2], input_ids[i][len(uii) - 1], -100 if len(uii) >= len(input_ids[i]) else input_ids[i][len(uii)])
-#                 print(labels[i][len(uii) - 4], labels[i][len(uii) - 3], labels[i][len(uii) - 2], labels[i][len(uii) - 1], -100 if len(uii) >= len(labels[i]) else labels[i][len(uii)])
-#                 print(attention_mask[i][len(uii) - 4], attention_mask[i][len(uii) - 3], attention_mask[i][len(uii) - 2], attention_mask[i][len(uii) - 1], -100 if len(uii) >= len(attention_mask[i]) else attention_mask[i][len(uii)])
-#             index.append(len(uii) + self.last_token)
-        
-#         index_tensor = torch.tensor(index).to(input_ids.device)
-#         if self.debug == 1 and torch.cuda.current_device() == 0:
-#             print(index_tensor)
 
-#         return index_tensor
-    
-#     def _build_additive_mask(self, k: int):
-#         mask = torch.zeros((k, k), dtype=torch.float32)
-#         mask[torch.triu(torch.ones(k, k), diagonal=1) == 1] = -torch.inf
-#         return mask
+# Copyright 2023 solo-learn development team.
 
-#     def build_with_additive_mask(self, inputs):
-#         if self.jepa_ratio > 0.0:
-#             if torch.rand(1).item() > self.jepa_ratio:
-#                 return {
-#                     "input_ids": inputs["input_ids"],
-#                     "labels": inputs["labels"],
-#                     "attention_mask": inputs["attention_mask"],
-#                 }, True
-#         batch_size = inputs["input_ids"].shape[0]
-#         seq_length = inputs["input_ids"].shape[-1]
-#         device = inputs["input_ids"].device
-#         mask = torch.full((batch_size * 2, 1, seq_length, seq_length), -torch.inf).to(device)
-#         last_token = self._last_token_index(inputs["input_ids"], inputs["labels"], inputs["attention_mask"])        
-#         last_token_user = self._last_token_index(inputs["input_ids_user"], inputs["labels_user"], inputs["attention_mask_user"])
-#         last_token_assistant = self._last_token_index(inputs["input_ids_assistant"], inputs["labels_assistant"], inputs["attention_mask_assistant"])
-#         for i in range(inputs["input_ids_user"].shape[0]):
-#             length, length_user, length_assistant = last_token[i] + 1, last_token_user[i] + 1, last_token_assistant[i] + 1
-#             inputs["input_ids_user"][i, length_user:length_user + length_assistant] = inputs["input_ids_assistant"][i, :length_assistant]
-#             inputs["labels_user"][i, length_user:length_user + length_assistant] = inputs["labels_assistant"][i, :length_assistant]
-#             mask[i, :, 0:length, 0:length] = self._build_additive_mask(length)
-#             mask[i + batch_size, :, 0:length_user, 0:length_user] = self._build_additive_mask(length_user)
-#             mask[i + batch_size, :, length_user:length_user + length_assistant, length_user:length_user + length_assistant] = self._build_additive_mask(length_assistant)
-#         self._last_token_user = last_token_user
-#         self._last_token_assistant = last_token_assistant + last_token_user + 1
-#         return {
-#                 "input_ids": torch.cat([inputs["input_ids"],
-#                                         inputs["input_ids_user"]], dim=0),
-#                 "labels": torch.cat([inputs["labels"],
-#                                     inputs["labels_user"]], dim=0),
-#                 "attention_mask": mask,
-#             }, False
+# Permission is hereby granted, free of charge, to any person obtaining a copy of
+# this software and associated documentation files (the "Software"), to deal in
+# the Software without restriction, including without limitation the rights to use,
+# copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the
+# Software, and to permit persons to whom the Software is furnished to do so,
+# subject to the following conditions:
 
-#     def forward(self, model, inputs):
-#         """
-#         Custom forward pass that handles all model calls.
-#         """
-#         # Main forward pass for language modeling
-#         if self.additive_mask:
-#             llm_inputs, skip_jepa = self.build_with_additive_mask(inputs)
-#         else:
-#             llm_inputs = {
-#                 "input_ids": torch.cat([inputs["input_ids"],
-#                                         inputs["input_ids_user"],
-#                                         inputs["input_ids_assistant"]], dim=0),
-#                 "labels": torch.cat([inputs["labels"],
-#                                     inputs["labels_user"],
-#                                     inputs["labels_assistant"]], dim=0),
-#                 "attention_mask": torch.cat([inputs["attention_mask"],
-#                                             inputs["attention_mask_user"],
-#                                             inputs["attention_mask_assistant"]], dim=0),
-#             }
-#         if self.debug == 7 and torch.cuda.current_device() == 0:
-#             torch.set_printoptions(threshold=float("inf"))
-#             torch.set_printoptions(linewidth=360)
-#             print(">>>input_ids<<<")
-#             print(llm_inputs["input_ids"])
-#             print(">>>labels<<<")
-#             print(llm_inputs["labels"])
-#             print(">>>attention_mask<<<")
-#             print(llm_inputs["attention_mask"])
-#             if self.additive_mask:
-#                 print(">>>last_token_user<<<")
-#                 print(self._last_token_user)
-#                 print(">>>last_token_assistant<<<")
-#                 print(self._last_token_assistant)
-#         if self.debug == 7:
-#             exit(0)
-#         if self.debug == 2 and torch.cuda.current_device() == 0:
-#             print("=====before:outputs=====")
-#             print("input_ids shapes:")
-#             print(llm_inputs["input_ids"].shape)
-#             print("labels shapes::")
-#             print(llm_inputs["labels"].shape)
-#             print("attention_mask shapes:")
-#             print(llm_inputs["attention_mask"].shape)
+# The above copyright notice and this permission notice shall be included in all copies
+# or substantial portions of the Software.
 
-#         with torch.set_grad_enabled(True):
-#             outputs = model(**llm_inputs, output_hidden_states=True)
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+# PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+# FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+# OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
 
-#         if self.debug == 2 and torch.cuda.current_device() == 0:
-#             print(f"=====outputs.loss.shape:{outputs.loss.shape}=====")
-#             print(f"=====outputs.hidden_states[-1].shape:{outputs.hidden_states[-1].shape}=====")
-        
-#         if self.additive_mask:
-#             if skip_jepa:
-#                 user_hidden_states = None
-#                 assistant_hidden_states = None
-#             else:    
-#                 batch_size = llm_inputs["input_ids"].shape[0] // 2
-#                 user_hidden_states = outputs.hidden_states[-1][batch_size: batch_size * 2]
-#                 assistant_hidden_states = user_hidden_states
-#         else:
-#             batch_size = llm_inputs["input_ids"].shape[0] // 3
-#             user_hidden_states = outputs.hidden_states[-1][batch_size: batch_size * 2]
-#             assistant_hidden_states = outputs.hidden_states[-1][batch_size * 2:]
+import torch
+import torch.nn.functional as F
+from solo.utils.misc import gather
 
-#         if self.debug == 2 and torch.cuda.current_device() == 0:
-#             print(f"====={user_hidden_states.shape}=====")
-#             print(f"====={assistant_hidden_states.shape}=====")
-       
-#         # Return all outputs needed for loss computation
-#         return {
-#             'main_outputs': outputs,
-#             'user_hidden_states': user_hidden_states,
-#             'assistant_hidden_states': assistant_hidden_states,
-#         }
 
-#     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-#         """
-#         Compute loss with additional regularization terms.
-#         """
-#         # Get indeices
-#         if not self.additive_mask:
-#             index_user = self._last_token_index(inputs["input_ids_user"], inputs["labels_user"], inputs["attention_mask_user"])
-#             index_assistant = self._last_token_index(inputs["input_ids_assistant"], inputs["labels_assistant"], inputs["attention_mask_assistant"])
-#         first_dim = inputs["input_ids_user"].shape[0]
-#         if self.debug == 1 and torch.cuda.current_device() == 0:
-#             print("=====last tokens=====")
-#             print(inputs["input_ids_user"][range(first_dim), index_user])
-#             print(inputs["input_ids_user"][range(first_dim), index_user - 1])
-#             print(inputs["input_ids_assistant"][range(first_dim), index_assistant])
-#             print(inputs["input_ids_assistant"][range(first_dim), index_assistant - 1])
 
-#         # Get all forward pass results
-#         forward_results = self.forward(model, inputs)
-        
-#         # Extract main language modeling loss
-#         main_outputs = forward_results['main_outputs']
-#         lm_loss = main_outputs.loss
 
-#         # Compute representation similarity loss
-#         user_hidden_states = forward_results['user_hidden_states']
-#         assistant_hidden_states = forward_results['assistant_hidden_states']
-        
-#         # Get embeddings (using last token of each sequence)
-#         if user_hidden_states is not None:
-#             if self.additive_mask:
-#                 index_user = self._last_token_user
-#                 index_assistant = self._last_token_assistant
-#             user_embedding = user_hidden_states[range(first_dim), index_user, :]
-#             assistant_embedding = assistant_hidden_states[range(first_dim), index_assistant, :]
-            
-#             # Compute cosine similarity
-#             cosine_similarity = F.cosine_similarity(user_embedding, assistant_embedding, dim=-1)
-#             if self.debug == 1 and torch.cuda.current_device() == 0:
-#                 print(user_embedding.shape, assistant_embedding.shape)
-#                 print(cosine_similarity.shape)
-    
-#             # Compute total loss
-#             if self.jepa_l2:
-#                 jepa_loss = torch.linalg.norm(user_embedding - assistant_embedding, ord=2, dim=-1).mean()
-#             elif self.jepa_mse:
-#                 jepa_loss = torch.mean((user_embedding - assistant_embedding) ** 2)
-#             elif self.infonce:
-#                 ue_norm = F.normalize(user_embedding, p=2, dim=1)
-#                 ae_norm = F.normalize(assistant_embedding, p=2, dim=1)
-#                 cosine_sim = torch.mm(ue_norm, ae_norm.T)
-#                 infonce_logit = cosine_sim / 0.07  # temperature
-#                 infonce_label = torch.arange(cosine_sim.size(0), device=cosine_sim.device)
-#                 jepa_loss = F.cross_entropy(infonce_logit, infonce_label)
-#                 if self.debug == 8:
-#                     print(cosine_sim.shape, infonce_logit.shape, infonce_label.shape, jepa_loss.shape)
-#                     exit(0)
-#             else:
-#                 jepa_loss = 1.0 - torch.mean(cosine_similarity)
-#         else:
-#             jepa_loss = 0.0
 
-#         total_loss = self.gamma * lm_loss + self.lbd * jepa_loss
 
-#         if self.debug == 2 and torch.cuda.current_device() == 0:
-#             print(lm_loss, self.lbd, torch.mean(cosine_similarity))
+def invariance_loss(z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
+    """Computes mse loss given batch of projected features z1 from view 1 and
+    projected features z2 from view 2.
 
-#         if self.debug == 1 or self.debug == 2:
-#             exit(0)
+    Args:
+        z1 (torch.Tensor): NxD Tensor containing projected features from view 1.
+        z2 (torch.Tensor): NxD Tensor containing projected features from view 2.
 
-#         if self.debug == 5 and torch.cuda.current_device() == 0:
-#             print(f"llm_loss: {lm_loss.float()}, jepa_loss: {jepa_loss.float()}")
+    Returns:
+        torch.Tensor: invariance loss (mean squared error).
+    """
 
-#         return (total_loss, main_outputs) if return_outputs else total_loss
+    return F.mse_loss(z1, z2)
+
+
+
+
+
+
+def variance_loss(z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
+    """Computes variance loss given batch of projected features z1 from view 1 and
+    projected features z2 from view 2.
+
+    Args:
+        z1 (torch.Tensor): NxD Tensor containing projected features from view 1.
+        z2 (torch.Tensor): NxD Tensor containing projected features from view 2.
+
+    Returns:
+        torch.Tensor: variance regularization loss.
+    """
+
+    eps = 1e-4
+    std_z1 = torch.sqrt(z1.var(dim=0) + eps)
+    std_z2 = torch.sqrt(z2.var(dim=0) + eps)
+    std_loss = torch.mean(F.relu(1 - std_z1)) + torch.mean(F.relu(1 - std_z2))
+    return std_loss
+
+
+
+
+
+
+
+def covariance_loss(z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
+    """Computes covariance loss given batch of projected features z1 from view 1 and
+    projected features z2 from view 2.
+
+    Args:
+        z1 (torch.Tensor): NxD Tensor containing projected features from view 1.
+        z2 (torch.Tensor): NxD Tensor containing projected features from view 2.
+
+    Returns:
+        torch.Tensor: covariance regularization loss.
+    """
+
+    N, D = z1.size()
+
+    z1 = z1 - z1.mean(dim=0)
+    z2 = z2 - z2.mean(dim=0)
+    cov_z1 = (z1.T @ z1) / (N - 1)
+    cov_z2 = (z2.T @ z2) / (N - 1)
+
+    diag = torch.eye(D, device=z1.device)
+    cov_loss = cov_z1[~diag.bool()].pow_(2).sum() / D + cov_z2[~diag.bool()].pow_(2).sum() / D
+    return cov_loss
+
+
+
+
+
+
+
+
+def vicreg_loss_func(
+    z1: torch.Tensor,
+    z2: torch.Tensor,
+    sim_loss_weight: float = 25.0,
+    var_loss_weight: float = 25.0,
+    cov_loss_weight: float = 1.0,
+) -> torch.Tensor:
+    """Computes VICReg's loss given batch of projected features z1 from view 1 and
+    projected features z2 from view 2.
+
+    Args:
+        z1 (torch.Tensor): NxD Tensor containing projected features from view 1.
+        z2 (torch.Tensor): NxD Tensor containing projected features from view 2.
+        sim_loss_weight (float): invariance loss weight.
+        var_loss_weight (float): variance loss weight.
+        cov_loss_weight (float): covariance loss weight.
+
+    Returns:
+        torch.Tensor: VICReg loss.
+    """
+
+    sim_loss = invariance_loss(z1, z2)
+
+    # vicreg's official code gathers the tensors here
+    # https://github.com/facebookresearch/vicreg/blob/main/main_vicreg.py
+    z1, z2 = gather(z1), gather(z2)
+
+    var_loss = variance_loss(z1, z2)
+    cov_loss = covariance_loss(z1, z2)
+
+    loss = sim_loss_weight * sim_loss + var_loss_weight * var_loss + cov_loss_weight * cov_loss
+    return loss
