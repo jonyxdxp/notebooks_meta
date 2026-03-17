@@ -1,84 +1,56 @@
-
-
-# 1. Crear la instancia
-
-# Entra a lambdalabs.com → Cloud → Launch Instance
-# Elige A10 (24GB) — suficiente para tus modelos y más barato que A100
-# Región: us-east-1 o us-west-2 (más disponibilidad)
-# Agrega tu SSH key antes de lanzar (Settings → SSH Keys)
-
-
-# 2. conectarte:
-
-ssh ubuntu@<ip-address>
-
-
-
-
-
-# 3. Setup del entorno (una sola vez)
-
-# Lambda ya viene con CUDA, PyTorch y conda preinstalados — verificar versiones
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-
-# Clonar tu repo
-git clone https://github.com/jonyxdxp/notebooks_meta.git
-cd notebooks_meta
-
-# Instalar dependencias
-pip install -r requirements.txt
-
-
-
-
-
-# 4. Migrar los datos de Google Drive
-
-# Instalar rclone
-curl https://rclone.org/install.sh | sudo bash
-
-# Configurar Google Drive
-rclone config
-# → sigue el wizard: n → name "gdrive" → Google Drive → browser auth
-
-# Copiar checkpoints y cache al servidor
-rclone copy gdrive:checkpoints /home/ubuntu/checkpoints
-rclone copy gdrive:data/cache  /home/ubuntu/data/cache
-
-
-
-
-# 5. Adaptar los paths del CFG
-
-CFG = _C(dict(
-    ...
-    cache_dir  = '/home/ubuntu/data/cache',
-    ckpt_dir   = '/home/ubuntu/checkpoints',
-    raw_data_dir = '/home/ubuntu/data/dailydialog_raw',
-    ...
-))
-
-
-
-
-# 6. Correr el entrenamiento
-
-# En lugar de celdas de Colab, convierte cada stage a un script .py
-# (ya los tenemos — son los archivos que generamos)
-
-# Correr Stage 1
-python train_text_jepa.py
-
-# Con nohup para que siga corriendo si te desconectas
-nohup python train_text_jepa.py > logs/stage1.log 2>&1 &
-tail -f logs/stage1.log
-
-
-
-
-
-# 7. Guardar resultados antes de terminar la instancia
-
-# Siempre antes de apagar — Lambda no tiene storage persistente por defecto
-rclone copy /home/ubuntu/checkpoints gdrive:checkpoints
-rclone copy /home/ubuntu/data/cache  gdrive:data/cache
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "955bd9ee",
+   "metadata": {},
+   "source": [
+    "1. Crear la instancia\n",
+    "\n",
+    "Entra a lambdalabs.com → Cloud → Launch Instance\n",
+    "Elige A10 (24GB) — suficiente para tus modelos y más barato que A100\n",
+    "Región: us-east-1 o us-west-2 (más disponibilidad)\n",
+    "Agrega tu SSH key antes de lanzar (Settings → SSH Keys)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0192592c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# 2. conectarte\n",
+    "\n",
+    "ssh ubuntu@<ip-address>"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "827e577b",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# 3. Setup del entorno (una sola vez)\n",
+    "\n",
+    "# Lambda ya viene con CUDA, PyTorch y conda preinstalados — verificar versiones\n",
+    "python -c \"import torch; print(torch.__version__, torch.cuda.is_available())\"\n",
+    "\n",
+    "# Clonar tu repo\n",
+    "git clone https://github.com/jonyxdxp/notebooks_meta.git\n",
+    "cd notebooks_meta\n",
+    "\n",
+    "# Instalar dependencias\n",
+    "pip install -r requirements.txt"
+   ]
+  }
+ ],
+ "metadata": {
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
