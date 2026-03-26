@@ -458,6 +458,12 @@ class SelfModifyingTitans(nn.Module):
 
 
 
+# :::::::::::::::::::::
+
+
+
+
+
 
 
     def _apply_local_conv(self, x: torch.Tensor) -> torch.Tensor:
@@ -528,6 +534,11 @@ class SelfModifyingTitans(nn.Module):
 
 
 
+
+
+
+
+
     def _apply_chunk_update_seq(
         self,
         state: SelfModifyingTitansState,
@@ -551,7 +562,7 @@ class SelfModifyingTitans(nn.Module):
         }
         grads = {name: self._memory_grads_chunk(boundary[name], k_seq, v_seq) for name in memories}
 
-        for t in range(steps):
+        for t in range(steps): 
             k_t = k_seq[:, t, :]
             eta_t = eta_seq[:, t]
             alpha_t = alpha_seq[:, t]
@@ -571,6 +582,9 @@ class SelfModifyingTitans(nn.Module):
                     alpha_t,
                     precond,
                 )
+
+
+
 
 
 
@@ -612,6 +626,11 @@ class SelfModifyingTitans(nn.Module):
             return g1, g2, None
         g1, g2, gskip = grads
         return g1, g2, gskip
+
+
+
+
+
 
     def _memory_grads_chunk(
         self,
@@ -727,6 +746,7 @@ class SelfModifyingTitans(nn.Module):
 
 
 
+
     def _apply_momentum(
         self,
         fast: ResidualMLPMemoryState,
@@ -751,6 +771,11 @@ class SelfModifyingTitans(nn.Module):
             w_skip=skip,
         )
 
+
+
+
+
+
     def _ensure_batched_state(
         self, state: SelfModifyingTitansState, batch: int
     ) -> SelfModifyingTitansState:
@@ -770,6 +795,11 @@ class SelfModifyingTitans(nn.Module):
                 f"State batch mismatch: expected batch={batch}, got {state.k.w1.size(0)}"
             )
         return state
+
+
+
+
+
 
     def _expand_memory_state(
         self, mem: ResidualMLPMemoryState, batch: int
@@ -847,10 +877,6 @@ class SelfModifyingTitans(nn.Module):
         while expanded.ndim < fast.ndim:
             expanded = expanded.unsqueeze(0)
         return fast + (expanded - expanded.detach())
-
-
-
-
 
 
 
