@@ -2,8 +2,6 @@
 # ── Cell 3: Imports ───────────────────────────────────────────────────────────
 
 
-import fire
-
 import copy
 import sys
 import typing
