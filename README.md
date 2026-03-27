@@ -55,9 +55,10 @@ export EBJEPA_CKPTS=/path/to/checkpoints
 ### Quick Start
 
 ```bash
+
 # Local training
 python -m vX.{s1,s2,s3}.train
-```
+
 > Our default configs are tuned for H100 GPUs. With older GPUs (e.g., A100, V100), you may need to reduce batch size to fit in memory.
 
 
