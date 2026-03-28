@@ -20,7 +20,7 @@ import tokenizers
 sys.path.insert(0, '/content/notebooks_meta/v6/s1')
 
 from cog_arch.encoder import Encoder
-from losses import VICRegLoss, BCS   # BCS kept as optional alternative
+from losses import BCS   # BCS kept as optional alternative
 
 
 
