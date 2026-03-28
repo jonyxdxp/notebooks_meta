@@ -27,6 +27,53 @@ from data.dataset import VOCAB_SIZE, tokenizer
 
 
 
+
+
+
+
+
+# Helper class to allow dot notation access to dictionary keys
+class _C:
+    def __init__(self, d):
+        for k, v in d.items():
+            setattr(self, k, _C(v) if isinstance(v, dict) else v)
+
+CFG_dict = dict(
+    # Model
+    hidden_size  = 256,
+    num_heads    = 4,       # 256 / 4 = 64 per head
+    num_layers   = 4,
+    max_seq_len  = 128,
+    mlp_ratio    = 4.0,
+
+    # JEPA masking
+    num_target_spans   = 4,
+    target_span_length = 8,
+
+    # Training
+    lr           = 1e-4,
+    weight_decay = 0.05,
+    n_epochs     = 20,
+    ema_decay     = 0.996,
+    batch_size   = 64,
+    eval_batch   = 128,
+    num_workers  = 0,
+
+    # VICReg
+    std_coeff = 50.0,   # was 25.0
+    cov_coeff = 1.0,
+
+    # Paths
+    cache_dir    = '/content/drive/MyDrive/data/cache',
+    ckpt_dir     = '/content/notebooks_meta/v4/s1/checkpoints',
+    raw_data_dir = '/content/data/dailydialog_processed', # Updated to new, consistent path for extracted data
+    tokenizer_name = 'bert-base-uncased',
+)
+
+
+
+
+
 # ── Functional forward ────────────────────────────────────────────────────────
 #
 # Standard forward_step calls encoder(x) which uses encoder.parameters()
