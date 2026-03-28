@@ -13,15 +13,20 @@ from torch.optim import AdamW
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-import datasets
-import transformers
-import tokenizers
+
 
 sys.path.insert(0, '/content/notebooks_meta/v6/s1')
 
 from cog_arch.encoder import Encoder
 from losses import BCS   # BCS kept as optional alternative
 
+
+
+from data.dataloader import get_jepa_dataloaders
+from data.dataset import VOCAB_SIZE, tokenizer
+
+
+import config
 
 
 
