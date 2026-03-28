@@ -5,13 +5,13 @@ Paper: "Dynamic Nested Hierarchies: Pioneering Self-Evolution in Machine
 Learning Architectures for Lifelong Intelligence" (arXiv:2511.14823)
 
 Implements:
-  - AssociativeMemoryModule  (M^(ℓ)_t) — inner memory module per level
-  - SelfModifyingMemory      (SMM)      — self-modifying associative memory (Eq. 17-19)
+   AssociativeMemoryModule  (M^(ℓ)_t) — inner memory module per level
+   SelfModifyingMemory      (SMM)      — self-modifying associative memory (Eq. 17-19)
   - MetaNetwork              (g_ψ)      — meta-network that generates Δθ
-  - LocalSurpriseSignal                 — LSS used for frequency modulation (Eq. 7)
+   LocalSurpriseSignal                 — LSS used for frequency modulation (Eq. 7)
   - FrequencyModulator                  — adaptive update frequency per level (Eq. 5, 16)
   - DNHLevel                            — one hierarchy level (M^(ℓ), f^(ℓ), params)
-  - DynamicNestedHierarchy   (DNH)      — the full time-varying DAG (Eq. 3-9)
+   DynamicNestedHierarchy   (DNH)      — the full time-varying DAG (Eq. 3-9)
   - MetaController           (E_ϕ)      — evolution operator (Eq. 11-12)
   - EvolvableAdam            (EAdam)    — evolvable optimizer (Eq. 20-21)
   - DNHSequenceModel                    — end-to-end sequence model built on DNH
