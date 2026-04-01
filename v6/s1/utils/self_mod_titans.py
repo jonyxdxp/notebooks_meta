@@ -1,8 +1,11 @@
 
 
 
+
 # from https://github.com/kmccleary3301/nested_learning/blob/main/src/nested_learning/titan/self_modifying.py
 
+
+# self-modifying titans code 
 
 
 
@@ -26,11 +29,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.func import grad, vmap
-
-
-
-
-
 
 
 @dataclass(frozen=True)
@@ -67,7 +65,6 @@ class SelfModifyingTitansConfig:
             raise ValueError("local_conv_window must be positive")
         if self.chunk_size_memory is None:
             object.__setattr__(self, "chunk_size_memory", int(self.chunk_size_other))
-
 
 
 
@@ -126,6 +123,10 @@ class SelfModifyingTitansState:
             alpha=self.alpha.clone(),
             memory=self.memory.clone(),
         )
+
+
+
+
 
 
 
@@ -225,6 +226,8 @@ class SelfModifyingTitans(nn.Module):
             in_dim=dim, out_dim=dim, hidden_dim=hidden, activation=act, use_skip=config.use_skip
         )
 
+
+
     def init_fast_state(self) -> SelfModifyingTitansState:
         return SelfModifyingTitansState(
             k=self._init_memory_state(self.m_k),
@@ -234,6 +237,8 @@ class SelfModifyingTitans(nn.Module):
             alpha=self._init_memory_state(self.m_alpha),
             memory=self._init_memory_state(self.m_memory),
         )
+
+
 
     def apply_updates_inplace(
         self,
@@ -258,12 +263,26 @@ class SelfModifyingTitans(nn.Module):
         )
         self._load_state_mean_(updated)
 
+
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
         x = self._apply_local_conv(x)
         q = self.m_q(x) if self.config.adaptive_q else self.w_q(x)
         if self.config.qk_l2_norm:
             q = F.normalize(q, dim=-1, eps=self.config.eps)
         return self.m_memory(q)
+    
+
+
+
+
+
+
+
+
+
+
+
 
     def forward_with_state(
         self,
@@ -285,6 +304,13 @@ class SelfModifyingTitans(nn.Module):
         if self.config.qk_l2_norm:
             q = F.normalize(q, dim=-1, eps=self.config.eps)
         return self._memory_forward(q, state.memory, meta=self.m_memory)
+
+
+
+
+
+
+
 
     def forward_with_updates(
         self,
@@ -424,6 +450,24 @@ class SelfModifyingTitans(nn.Module):
 
         return torch.cat(outputs, dim=1), state
 
+
+
+
+
+
+
+
+
+
+
+# :::::::::::::::::::::
+
+
+
+
+
+
+
     def _apply_local_conv(self, x: torch.Tensor) -> torch.Tensor:
         if self.local_conv is None:
             return x
@@ -435,6 +479,10 @@ class SelfModifyingTitans(nn.Module):
         x_t = F.pad(x_t, (kernel - 1, 0))
         x_t = self.local_conv(x_t)
         return x_t.transpose(1, 2)
+
+
+
+
 
     def _load_state_mean_(self, state: SelfModifyingTitansState) -> None:
         def _mean_weight(weight: torch.Tensor) -> torch.Tensor:
@@ -459,6 +507,11 @@ class SelfModifyingTitans(nn.Module):
             if self.config.adaptive_q:
                 _copy(self.m_q, state.q)
 
+
+
+
+
+
     def _apply_chunk_update(
         self,
         state: SelfModifyingTitansState,
@@ -480,6 +533,13 @@ class SelfModifyingTitans(nn.Module):
             alpha_seq=alpha_seq,
             memories=memories,
         )
+
+
+
+
+
+
+
 
     def _apply_chunk_update_seq(
         self,
@@ -504,7 +564,7 @@ class SelfModifyingTitans(nn.Module):
         }
         grads = {name: self._memory_grads_chunk(boundary[name], k_seq, v_seq) for name in memories}
 
-        for t in range(steps):
+        for t in range(steps): 
             k_t = k_seq[:, t, :]
             eta_t = eta_seq[:, t]
             alpha_t = alpha_seq[:, t]
@@ -524,6 +584,13 @@ class SelfModifyingTitans(nn.Module):
                     alpha_t,
                     precond,
                 )
+
+
+
+
+
+
+
 
     def _memory_grads(
         self,
@@ -561,6 +628,11 @@ class SelfModifyingTitans(nn.Module):
             return g1, g2, None
         g1, g2, gskip = grads
         return g1, g2, gskip
+
+
+
+
+
 
     def _memory_grads_chunk(
         self,
@@ -636,6 +708,15 @@ class SelfModifyingTitans(nn.Module):
             g2_tokens.transpose(0, 1),
             gskip_tokens.transpose(0, 1),
         )
+    
+
+
+
+
+
+
+
+
 
     def _apply_param_update(
         self,
@@ -664,6 +745,10 @@ class SelfModifyingTitans(nn.Module):
         else:
             fast.w_skip = alpha_t[:, None, None] * fast.w_skip - eta_t[:, None, None] * gskip
 
+
+
+
+
     def _apply_momentum(
         self,
         fast: ResidualMLPMemoryState,
@@ -688,6 +773,11 @@ class SelfModifyingTitans(nn.Module):
             w_skip=skip,
         )
 
+
+
+
+
+
     def _ensure_batched_state(
         self, state: SelfModifyingTitansState, batch: int
     ) -> SelfModifyingTitansState:
@@ -708,6 +798,11 @@ class SelfModifyingTitans(nn.Module):
             )
         return state
 
+
+
+
+
+
     def _expand_memory_state(
         self, mem: ResidualMLPMemoryState, batch: int
     ) -> ResidualMLPMemoryState:
@@ -725,6 +820,13 @@ class SelfModifyingTitans(nn.Module):
             m_w2=_expand_opt(mem.m_w2),
             m_w_skip=_expand_opt(mem.m_w_skip),
         )
+
+
+
+
+
+
+
 
     def _memory_forward(
         self,
@@ -765,6 +867,10 @@ class SelfModifyingTitans(nn.Module):
             return out.squeeze(1)
         return out
 
+
+
+
+
     @staticmethod
     def _straight_through_meta(fast: torch.Tensor, meta: torch.Tensor) -> torch.Tensor:
         if meta.ndim > fast.ndim:
@@ -773,3 +879,16 @@ class SelfModifyingTitans(nn.Module):
         while expanded.ndim < fast.ndim:
             expanded = expanded.unsqueeze(0)
         return fast + (expanded - expanded.detach())
+
+
+
+
+
+
+
+
+
+
+
+
+

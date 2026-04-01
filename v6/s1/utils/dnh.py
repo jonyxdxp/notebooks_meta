@@ -64,6 +64,12 @@ class LocalSurpriseSignal(nn.Module):
         return self.gamma * surprise
 
 
+
+
+
+
+
+
 # ---------------------------------------------------------------------------
 # 2.  Meta-Network  g_ψ  (Eq. 17-18)
 # ---------------------------------------------------------------------------
@@ -95,6 +101,17 @@ class MetaNetwork(nn.Module):
         inp = torch.cat([keys, vals, context], dim=-1)
         delta = self.net(inp)                          # [B, val_dim * key_dim]
         return delta.view(-1, self.val_dim, self.key_dim)
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +179,13 @@ class SelfModifyingMemory(nn.Module):
 
     def reset_memory(self):
         self.memory.zero_()
+
+
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +379,24 @@ class MetaController(nn.Module):
         return (
             level.get_gradient_norm() < self.effective_eps.item()
         )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
