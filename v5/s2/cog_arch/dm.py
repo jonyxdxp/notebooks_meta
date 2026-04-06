@@ -1,5 +1,86 @@
 
 
+# Dynamics Model (outputs the next State and the inmediate Energy of the prediction
+# wich will be the Loss function, akin to the Rewards logic)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# from https://github.com/werner-duvaud/muzero-general/blob/master/models.py
+
+
+
+
+
+
+
+class DynamicsNetwork(torch.nn.Module):
+    def __init__(
+        self,
+        num_blocks,
+        num_channels,
+        reduced_channels_reward,
+        fc_reward_layers,
+        full_support_size,
+        block_output_size_reward,
+    ):
+        super().__init__()
+        self.conv = conv3x3(num_channels, num_channels - 1)
+        self.bn = torch.nn.BatchNorm2d(num_channels - 1)
+        self.resblocks = torch.nn.ModuleList(
+            [ResidualBlock(num_channels - 1) for _ in range(num_blocks)]
+        )
+
+        self.conv1x1_reward = torch.nn.Conv2d(
+            num_channels - 1, reduced_channels_reward, 1
+        )
+        self.block_output_size_reward = block_output_size_reward
+        self.fc = mlp(
+            self.block_output_size_reward,
+            fc_reward_layers,
+            full_support_size,
+        )
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = torch.nn.functional.relu(x)
+        for block in self.resblocks:
+            x = block(x)
+        state = x
+        x = self.conv1x1_reward(x)
+        x = x.view(-1, self.block_output_size_reward)
+        reward = self.fc(x)
+        return state, reward
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # from https://github.com/lucas-maes/le-wm/blob/main/module.py

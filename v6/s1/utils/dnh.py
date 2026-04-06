@@ -177,6 +177,8 @@ class SelfModifyingMemory(nn.Module):
 
         return out
 
+
+
     def reset_memory(self):
         self.memory.zero_()
 

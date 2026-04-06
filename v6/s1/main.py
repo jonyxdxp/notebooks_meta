@@ -98,6 +98,16 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
 
 
 
+# Create optimizer with nested learning
+
+    # optimizer = DeepMomentumGD(
+    #     model.parameters(),
+    #     lr=1e-3,
+    #     momentum=0.9,
+    #     memory_lr=1e-4,
+    # )
+
+
 
 
 

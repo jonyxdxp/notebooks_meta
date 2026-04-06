@@ -1,3 +1,91 @@
+
+
+# Prediction Model (outputs the Value and Policy heads)
+
+
+
+
+
+
+
+
+
+
+
+
+# from https://github.com/werner-duvaud/muzero-general/blob/master/models.py
+
+
+
+
+
+
+
+class PredictionNetwork(torch.nn.Module):
+    def __init__(
+        self,
+        action_space_size,
+        num_blocks,
+        num_channels,
+        reduced_channels_value,
+        reduced_channels_policy,
+        fc_value_layers,
+        fc_policy_layers,
+        full_support_size,
+        block_output_size_value,
+        block_output_size_policy,
+    ):
+        super().__init__()
+        self.resblocks = torch.nn.ModuleList(
+            [ResidualBlock(num_channels) for _ in range(num_blocks)]
+        )
+
+        self.conv1x1_value = torch.nn.Conv2d(num_channels, reduced_channels_value, 1)
+        self.conv1x1_policy = torch.nn.Conv2d(num_channels, reduced_channels_policy, 1)
+        self.block_output_size_value = block_output_size_value
+        self.block_output_size_policy = block_output_size_policy
+        self.fc_value = mlp(
+            self.block_output_size_value, fc_value_layers, full_support_size
+        )
+        self.fc_policy = mlp(
+            self.block_output_size_policy,
+            fc_policy_layers,
+            action_space_size,
+        )
+
+    def forward(self, x):
+        for block in self.resblocks:
+            x = block(x)
+        value = self.conv1x1_value(x)
+        policy = self.conv1x1_policy(x)
+        value = value.view(-1, self.block_output_size_value)
+        policy = policy.view(-1, self.block_output_size_policy)
+        value = self.fc_value(value)
+        policy = self.fc_policy(policy)
+        return policy, value
+
+
+
+
+
+
+
+
+
+
+
+
+# ----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
 """
 EBT-Policy: Energy Unlocks Emergent Physical Reasoning Capabilities
 ====================================================================
