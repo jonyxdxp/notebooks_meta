@@ -8,56 +8,38 @@
 # Configuración Stage 1: Entrenamiento de Encoders (Texto JEPA)
 # NOTA: Adaptado de Video MNIST a Transformer para texto
 
-meta:
-  seed: 2025
-  device: auto        # auto, cuda, or cpu
+# Meta
+seed: 2025
+device: auto
 
-data:
-  dataset: text_seq   # o el nombre de tu dataset de texto
-  batch_size: 64
-  num_workers: 4
-  max_seq_len: 512    # Longitud máxima de secuencia (antes steps en video)
+# Modelo Transformer (acceso directo requerido por el código)
+hidden_size: 256
+num_heads: 4
+num_layers: 4
+max_seq_len: 128
+mlp_ratio: 4.0
+vocab_size: 30522
 
-model:
-  # Encoder Transformer (Stage 1 - Entrenable)
-  vocab_size: 30522   # Tamaño vocabulario (BERT tokenizer)
-  hidden_size: 256    # Dimensión oculta (antes henc=32 en video)
-  num_heads: 8        # Cabezas de atención
-  num_layers: 4       # Capas del encoder
-  max_seq_len: 512    # Máxima longitud
-  
-  # Proyección (para BCS/VICReg loss)
-  dstc: 256           # Dimensión de representación final (output pooled)
+# JEPA Masking (requerido por dataloader)
+num_target_spans: 4
+target_span_length: 8
 
-loss:
-  # BCS (Batch Covariance Structure) Loss
-  lmbd: 10.0          # Controla Gaussianidad vs Invarianza
-  # Alternativa: VICReg
-  std_coeff: 10.0     
-  cov_coeff: 100.0    
+# Training (acceso directo requerido)
+batch_size: 64
+eval_batch: 128
+num_workers: 0
+lr: 0.0001
+weight_decay: 0.05
+n_epochs: 20
+ema_decay: 0.996
 
-optim:
-  epochs: 50
-  lr: 1.0e-3
-  weight_decay: 0.05  # Necesario para AdamW
+# Loss (VICReg/BCS)
+std_coeff: 50.0
+cov_coeff: 1.0
+lmbd: 10.0  # Para BCS loss
 
-training:
-  use_amp: true       # Mixed precision
-  dtype: float16
-  ema_decay: 0.996    # Decay para target encoder EMA
-
-logging:
-  log_wandb: false    # Cambiar a true si usas wandb
-  wandb_group: 
-  log_every: 1
-  save_every: 5       # Guardar cada 5 épocas
-  tqdm_silent: false
-  exp_dir: "./experiments/stage1"
-
-# Parámetros para sweep (opcional)
-sweep:
-  param_grid:
-    data.batch_size: [32, 64]
-    optim.lr: [0.001, 0.0001]
-    loss.lmbd: [1, 10, 100]
-    meta.seed: [1, 1000, 10000]
+# Paths (requeridos por dataset y checkpoints)
+cache_dir: '/content/drive/MyDrive/data/cache'
+ckpt_dir: '/content/notebooks_meta/v5/s1/checkpoints'
+raw_data_dir: '/content/data/dailydialog_processed'
+tokenizer_name: 'bert-base-uncased'
