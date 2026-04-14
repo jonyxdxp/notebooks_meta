@@ -1,6 +1,9 @@
 
 # ── Cell 3: Imports ───────────────────────────────────────────────────────────
 
+
+import os  # <-- Falta esto
+
 import copy
 import sys
 import typing

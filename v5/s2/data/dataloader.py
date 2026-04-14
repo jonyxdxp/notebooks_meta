@@ -1,58 +1,67 @@
-# dataloader
-
-
-
-
-
-# ── Cell 3: Imports ───────────────────────────────────────────────────────────
-
-import copy
+# dataloader.py - Stage 2 (Turn pairs, no masking)
 import sys
-import typing
-
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-import datasets
-import transformers
+from typing import Optional
 
-from data.dataset import get_dailydialog_dataset, JEPAMaskCollator, tokenizer
-
-
-
-
-
-
-# ── Cell S2-3: Build dataloaders ──────────────────────────────────────────────
-
-pair_dataset = get_turn_pair_dataset(
-    cache_dir = CFG.cache_dir,
-    tokenizer = tokenizer,
-    block_size = CFG.max_seq_len,
+# Importar desde el dataset de Stage 2 (turn pairs)
+from data.dataset import (
+    get_turn_pair_dataset, 
+    TurnPairCollator, 
+    tokenizer,
+    CFG  # El CFG local de Stage 2 si lo necesitas
 )
 
-collator = TurnPairCollator()
+def get_stage2_dataloaders(
+    cfg_obj,
+    tokenizer,
+    skip_train: bool = False,
+    skip_valid: bool = False,
+):
+    """
+    Crea dataloaders para Stage 2 (pares de turnos consecutivos).
+    No usa masking, solo pares (contexto, target) = (turno_t, turno_{t+1})
+    """
+    
+    # Cargar dataset de pares
+    pair_dataset = get_turn_pair_dataset(
+        cache_dir=cfg_obj.data.cache_dir if hasattr(cfg_obj, 'data') else cfg_obj.cache_dir,
+        tokenizer=tokenizer,
+        block_size=cfg_obj.model.max_seq_len if hasattr(cfg_obj, 'model') else cfg_obj.max_seq_len,
+    )
+    
+    collator = TurnPairCollator()
+    
+    train_loader = None
+    val_loader = None
+    
+    batch_size = cfg_obj.data.batch_size if hasattr(cfg_obj, 'data') else cfg_obj.batch_size
+    eval_batch = cfg_obj.data.eval_batch if hasattr(cfg_obj, 'data') else getattr(cfg_obj, 'eval_batch', batch_size)
+    num_workers = cfg_obj.data.num_workers if hasattr(cfg_obj, 'data') else cfg_obj.num_workers
+    
+    if not skip_train:
+        train_loader = torch.utils.data.DataLoader(
+            pair_dataset['train'],
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            collate_fn=collator,
+        )
+        train_loader.tokenizer = tokenizer
 
-train_loader = torch.utils.data.DataLoader(
-    pair_dataset['train'],
-    batch_size  = CFG.batch_size,
-    shuffle     = True,
-    num_workers = 0,
-    pin_memory  = True,
-    collate_fn  = collator,
-)
-val_loader = torch.utils.data.DataLoader(
-    pair_dataset['validation'],
-    batch_size  = CFG.eval_batch,
-    shuffle     = False,
-    num_workers = 0,
-    pin_memory  = True,
-    collate_fn  = collator,
-)
+    if not skip_valid:
+        val_loader = torch.utils.data.DataLoader(
+            pair_dataset['validation'],
+            batch_size=eval_batch,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            collate_fn=collator,
+        )
+        val_loader.tokenizer = tokenizer
 
-print(f"Train pairs : {len(pair_dataset['train']):,}")
-print(f"Train batches : {len(train_loader)}  |  Val batches : {len(val_loader)}")
+    return train_loader, val_loader
+
+
+# Mantener nombre alternativo para compatibilidad si se necesita
+get_jepa_dataloaders = get_stage2_dataloaders
