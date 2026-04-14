@@ -1,72 +1,59 @@
 
-# from https://github.com/facebookresearch/eb_jepa/blob/main/examples/image_jepa/cfgs/sigreg.yaml
+# from https://github.com/facebookresearch/eb_jepa/blob/main/examples/video_jepa/cfgs/default.yaml
 
 
 
-
-# Image SIGReg (BCS) Training Configuration
-# Train a self-supervised image representation model on CIFAR-10 using BCS loss
+# Video JEPA Training Configuration
+# Train a self-supervised video prediction model on Moving MNIST
 
 meta:
-  seed: 42
+  seed: 2025
   device: auto  # auto, cuda, or cpu
 
 data:
-  dataset: cifar10
-  batch_size: 256
+  dataset: moving_mnist
+  batch_size: 64
   num_workers: 4
 
 model:
-  # Backbone
-  type: resnet       # resnet, vit_s, vit_b
-  patch_size: 2      # For ViT only
+  # Encoder (ResNet5)
+  dobs: 1           # Input channels (grayscale)
+  henc: 32          # Hidden dimension in encoder
+  dstc: 16          # Output representation dimension
 
-  # Projector
-  use_projector: true
-  proj_hidden_dim: 2048
-  proj_output_dim: 128
+  # Predictor (ResUNet)
+  hpre: 32          # Hidden dimension in predictor
+
+  # Training
+  steps: 4          # Number of prediction steps during training
 
 loss:
-  type: bcs          # vicreg or bcs
-  # BCS loss weight
-  lmbd: 10.0
+  # Variance-Covariance regularization
+  cov_coeff: 100.0  # Covariance loss weight
+  std_coeff: 10.0   # Standard deviation loss weight
 
 optim:
-  epochs: 300
-  lr: 0.3
-  weight_decay: 1.0e-4
-  warmup_epochs: 10
-  warmup_start_lr: 3.0e-5
-  min_lr: 0.0
+  epochs: 50
+  lr: 1.0e-3
 
 logging:
   log_wandb: true
   wandb_group:        # Set to group runs (e.g., for seed averaging)
-  log_every: 10       # Log every N epochs
-  save_every: 50      # Save checkpoint every N epochs
+  log_every: 1        # Log every N epochs
+  save_every: 10      # Save checkpoint every N epochs
   tqdm_silent: false  # Disable tqdm progress bars
 
 training:
-  use_amp: true      # Use automatic mixed precision
-  dtype: bfloat16      # float16 or bfloat16
+  use_amp: true       # Use automatic mixed precision
+  dtype: float16      # float16 or bfloat16
 
 # --- Parameters used when running with --full-sweep
 # By default, only the parameters specified above are used
 sweep:
-  # Sweep grid for SIGReg (BCS loss) hyperparameter search
+  # Sweep grid for video JEPA hyperparameter search
   param_grid:
-    data.batch_size: [256]
-    model.use_projector: [true, false]
-    model.proj_hidden_dim: [64, 128, 256, 512, 1024, 2048, 4096]
-    model.proj_output_dim: [64, 128, 256, 512, 1024, 2048, 4096]
-    loss.lmbd: [0.1,1.0, 10.0, 100.0]
+    data.batch_size: [32, 64]
+    optim.lr: [0.001, 0.0001, 0.0005]
+    loss.std_coeff: [1, 10, 100, 200]
+    loss.cov_coeff: [1, 10, 100, 200]
     meta.seed: [1, 1000, 10000]
-
-
-
-
-# metalearning:
-
-CFG.inner_lr       = 1e-3    # alpha: inner loop step size
-CFG.n_inner_steps  = 1       # how many inner steps per task
-CFG.support_ratio  = 0.5     # fraction of each batch used as support

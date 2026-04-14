@@ -1,0 +1,71 @@
+# from https://github.com/facebookresearch/eb_jepa/blob/main/examples/ac_video_jepa/cfgs/planning_mppi.yaml
+
+
+
+
+
+
+# Configuración JEPA Stage 2 (Predictor Training)
+# Compatible con: código Transformer + VICReg/VC Loss
+
+meta:
+  seed: 2025
+  device: auto          # auto, cuda, or cpu
+
+data:
+  dataset: moving_mnist # o sequence_dataset si es texto
+  batch_size: 64
+  num_workers: 4
+  max_seq_len: 16       # Longitud máxima de secuencia (frames para video, tokens para texto)
+
+model:
+  # ── Encoder (Stage 1 - Congelado) ─────────────────────────────
+  # Parámetros Transformer para context_encoder y target_encoder
+  vocab_size: 256       # Tamaño vocabulario (para tokenización) - AJUSTAR según tu tokenizer
+  hidden_size: 32       # Dimensión oculta D (antes 'henc' en ResNet, ahora dim transformer)
+  num_heads: 4          # Cabezas de atención (necesario para atención multi-cabeza)
+  num_layers: 2         # Capas del encoder
+  max_seq_len: 16       # Máxima longitud de secuencia (redundante pero útil)
+  
+  # ── Predictor (Stage 2 - Entrenable) ──────────────────────────
+  pred_hidden_size: 32  # Dimensión interna del predictor (equivalente a 'hpre')
+  pred_num_heads: 4     # Cabezas de atención del predictor
+  pred_num_layers: 2    # Capas del predictor
+  action_dim: 0         # Dimensión de acción/control (0 para JEPA puro sin acciones)
+  
+  # ── Proyección (para VICReg/VC Loss) ───────────────────────────
+  dstc: 16              # Dimensión de representación final (output del encoder/proyector)
+
+loss:
+  # Variance-Covariance regularization (VICReg)
+  std_coeff: 10.0       # Pérdida de desviación estándar
+  cov_coeff: 100.0      # Pérdida de covarianza (off-diagonal)
+
+optim:
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.05    # AÑADIDO: regularización L2 (necesario para AdamW)
+
+training:
+  use_amp: true         # Mixed precision
+  dtype: float16
+  s1_ckpt: null         # AÑADIDO: Path al checkpoint de Stage 1 (encoders pre-entrenados)
+                       # Ejemplo: "./stage1/checkpoint_best.pth.tar"
+  ema_decay: 0.996      # AÑADIDO: Decay para Exponential Moving Average (0.9-0.999)
+
+logging:
+  log_wandb: true
+  wandb_group: 
+  log_every: 1          # Validar/loggear cada N épocas
+  save_every: 10        # Guardar checkpoint cada N épocas
+  tqdm_silent: false
+  exp_dir: "./experiments/jepa_stage2"  # AÑADIDO: Directorio para guardar checkpoints
+
+# --- Parámetros para búsqueda de hiperparámetros (sweep) ---
+sweep:
+  param_grid:
+    data.batch_size: [32, 64]
+    optim.lr: [0.001, 0.0001, 0.0005]
+    loss.std_coeff: [1, 10, 100, 200]
+    loss.cov_coeff: [1, 10, 100, 200]
+    meta.seed: [1, 1000, 10000]
