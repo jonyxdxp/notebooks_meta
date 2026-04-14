@@ -7,7 +7,7 @@ import torch
 from types import SimpleNamespace
 
 # Path al YAML (misma carpeta que este archivo)
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'sigreg.yaml')
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config/sigreg.yaml')
 
 def load_yaml_config(path):
     with open(path, 'r') as f:
