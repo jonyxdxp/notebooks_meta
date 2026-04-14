@@ -19,14 +19,15 @@ logger = logging.getLogger(__name__)
 # Importar config ANTES que todo
 sys.path.insert(0, '/content/notebooks_meta/v5/s2')
 from config import CFG, DEVICE
-
-# Imports del proyecto
-sys.path.insert(0, '/content/notebooks_meta/v5/s1')
-from cog_arch.encoder import Encoder
 from cog_arch.dm import DM, Projector
 from losses import SquareLossSeq, VCLoss
 from data.dataloader import get_jepa_dataloaders
 from data.dataset import VOCAB_SIZE, tokenizer
+
+# Imports del proyecto
+sys.path.insert(0, '/content/notebooks_meta/v5/s1')
+from cog_arch.encoder import Encoder
+
 
 import copy
 
