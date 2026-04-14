@@ -12,11 +12,16 @@ meta:
   seed: 2025
   device: auto          # auto, cuda, or cpu
 
+
 data:
-  dataset: moving_mnist # o sequence_dataset si es texto
+  dataset: moving_mnist
   batch_size: 64
   num_workers: 4
-  max_seq_len: 16       # Longitud máxima de secuencia (frames para video, tokens para texto)
+  max_seq_len: 16
+  # AÑADIR ESTOS:
+  eval_batch: 64        # Tamaño batch validación (o 128)
+  num_target_spans: 4   # Para JEPAMaskCollator
+  target_span_length: 8 # Para JEPAMaskCollator
 
 model:
   # ── Encoder (Stage 1 - Congelado) ─────────────────────────────
@@ -49,8 +54,7 @@ optim:
 training:
   use_amp: true         # Mixed precision
   dtype: float16
-  s1_ckpt: null         # AÑADIDO: Path al checkpoint de Stage 1 (encoders pre-entrenados)
-                       # Ejemplo: "./stage1/checkpoint_best.pth.tar"
+  s1_ckpt: "/content/notebooks_meta/v5/s1/checkpoints/epoch_best.pt"  # Ruta real
   ema_decay: 0.996      # AÑADIDO: Decay para Exponential Moving Average (0.9-0.999)
 
 logging:
@@ -69,3 +73,6 @@ sweep:
     loss.std_coeff: [1, 10, 100, 200]
     loss.cov_coeff: [1, 10, 100, 200]
     meta.seed: [1, 1000, 10000]
+
+
+

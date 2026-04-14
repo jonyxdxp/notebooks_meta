@@ -365,10 +365,8 @@ save_checkpoint(CFG.n_epochs, {})
 
 
 
-
 if __name__ == "__main__":
-    fire.Fire(run)
-
+    run()
 
 
 
