@@ -1,6 +1,8 @@
 
 # ── Cell 3: Imports ───────────────────────────────────────────────────────────
 
+import os           # <-- AGREGAR ESTA LÍNEA
+import glob         # <-- AGREGAR ESTA LÍNEA TAMBIÉN
 
 import copy
 import sys
