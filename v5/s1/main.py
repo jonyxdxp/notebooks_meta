@@ -16,11 +16,6 @@ import matplotlib.gridspec as gridspec
 
 
 
-# IMPORTANTE: Importar config PRIMERO para definir CFG y DEVICE
-import config
-from config import CFG, DEVICE
-
-
 
 sys.path.insert(0, '/content/notebooks_meta/v5/s1')
 
@@ -34,6 +29,11 @@ from data.dataset import VOCAB_SIZE, tokenizer
 
 
 
+
+
+# IMPORTANTE: Importar config PRIMERO para definir CFG y DEVICE
+import config
+from config import CFG, DEVICE
 
 
 
