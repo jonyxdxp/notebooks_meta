@@ -35,7 +35,7 @@ def get_device(config):
 # Busca el YAML en el directorio actual o en /content/notebooks_meta/v5/s1/
 config_paths = [
     "sigreg.yaml",
-    "/content/notebooks_meta/v5/s1/sigreg.yaml",
+    "/content/notebooks_meta/v5/s1/config/sigreg.yaml",
     "/content/notebooks_meta/v5/config/sigreg.yaml",
 ]
 
