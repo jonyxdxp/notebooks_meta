@@ -248,16 +248,25 @@ def train_epoch(loader, epoch):
 
 # ── Cell 14: Checkpointing ────────────────────────────────────────────────────
 
-def save_checkpoint(epoch, metrics):
-    path = os.path.join(CFG.ckpt_dir, f'epoch_{epoch:03d}.pt')
+def save_checkpoint(epoch, metrics, suffix=None):
+    """Guarda checkpoint de encoders"""
+    if suffix is not None:
+        filename = f'{suffix}.pt'
+    elif isinstance(epoch, int):
+        filename = f'epoch_{epoch:03d}.pt'
+    else:
+        filename = f'epoch_{epoch}.pt'
+    
+    path = os.path.join(CFG.ckpt_dir, filename)
+    
     torch.save({
-        'epoch':           epoch,
+        'epoch':           epoch if isinstance(epoch, int) else -1,
         'context_encoder': context_encoder.state_dict(),
         'target_encoder':  target_encoder.state_dict(),
         'optimizer':       optimizer.state_dict(),
         'scheduler':       scheduler.state_dict(),
         'metrics':         metrics,
-        'cfg':             CFG,
+        'cfg':             {k: v for k, v in vars(CFG).items() if not k.startswith('_')},
     }, path)
     print(f'  ✓ saved → {path}')
 
@@ -371,81 +380,6 @@ if __name__ == "__main__":
 
 
 
-
-
-
-
-# ------ INCLUDE EVAL SCRIPT -----------
-
-
-
-
-
-
-
-
-
-
-
-
-# from https://github.com/facebookresearch/eb_jepa/blob/main/examples/image_jepa/eval.py
-
-
-
-
-
-
-
-"""
-Evaluation utilities for self-supervised learning.
-"""
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.amp import autocast
-
-
-class LinearProbe(nn.Module):
-    """Linear probe classifier for evaluating representations."""
-
-    def __init__(self, feature_dim, num_classes):
-        super().__init__()
-        self.classifier = nn.Linear(feature_dim, num_classes)
-
-    def forward(self, x):
-        return self.classifier(x)
-
-
-def evaluate_linear_probe(model, linear_probe, val_loader, device, use_amp=True):
-    """Evaluate linear probe on validation set."""
-    model.eval()
-    linear_probe.eval()
-
-    total_loss = 0
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for data, target in val_loader:
-            data = data.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
-
-            with autocast("cuda", enabled=use_amp):
-                features, _ = model(data)
-
-            outputs = linear_probe(features.float())
-            loss = F.cross_entropy(outputs, target)
-
-            total_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += target.size(0)
-            correct += predicted.eq(target).sum().item()
-
-    accuracy = 100.0 * correct / total
-    avg_loss = total_loss / len(val_loader)
-
-    return accuracy, avg_loss
 
 
 
