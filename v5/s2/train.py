@@ -265,6 +265,23 @@ def log_epoch(epoch, metrics, total_epochs):
                 " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()]))
 
 
+def encode_turn(input_ids, attention_mask):
+    """
+    Encode a turn with the frozen encoder → mean-pool over real tokens → (B, D).
+    No masking needed here — pool all non-padding positions.
+    """
+    with torch.no_grad():
+        hidden = context_encoder(input_ids, attention_mask=attention_mask)
+        if isinstance(hidden, tuple):
+            hidden = hidden[0]                        # (B, L, D)
+    # mean pool over non-padding tokens
+    mask_f = attention_mask.unsqueeze(-1).float()     # (B, L, 1)
+    pooled = (hidden * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
+    return pooled
+
+
+
+
 
 
 
