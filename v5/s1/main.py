@@ -15,6 +15,13 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
 
+
+# IMPORTANTE: Importar config PRIMERO para definir CFG y DEVICE
+import config
+from config import CFG, DEVICE
+
+
+
 sys.path.insert(0, '/content/notebooks_meta/v5/s1')
 
 from cog_arch.encoder import Encoder
@@ -25,8 +32,6 @@ from losses import BCS   # BCS kept as optional alternative
 from data.dataloader import get_jepa_dataloaders
 from data.dataset import VOCAB_SIZE, tokenizer
 
-
-import config
 
 
 

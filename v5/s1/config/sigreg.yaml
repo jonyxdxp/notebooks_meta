@@ -3,57 +3,61 @@
 
 
 
-# Video JEPA Training Configuration
-# Train a self-supervised video prediction model on Moving MNIST
+
+
+# Configuración Stage 1: Entrenamiento de Encoders (Texto JEPA)
+# NOTA: Adaptado de Video MNIST a Transformer para texto
 
 meta:
   seed: 2025
-  device: auto  # auto, cuda, or cpu
+  device: auto        # auto, cuda, or cpu
 
 data:
-  dataset: moving_mnist
+  dataset: text_seq   # o el nombre de tu dataset de texto
   batch_size: 64
   num_workers: 4
+  max_seq_len: 512    # Longitud máxima de secuencia (antes steps en video)
 
 model:
-  # Encoder (ResNet5)
-  dobs: 1           # Input channels (grayscale)
-  henc: 32          # Hidden dimension in encoder
-  dstc: 16          # Output representation dimension
-
-  # Predictor (ResUNet)
-  hpre: 32          # Hidden dimension in predictor
-
-  # Training
-  steps: 4          # Number of prediction steps during training
+  # Encoder Transformer (Stage 1 - Entrenable)
+  vocab_size: 30522   # Tamaño vocabulario (BERT tokenizer)
+  hidden_size: 256    # Dimensión oculta (antes henc=32 en video)
+  num_heads: 8        # Cabezas de atención
+  num_layers: 4       # Capas del encoder
+  max_seq_len: 512    # Máxima longitud
+  
+  # Proyección (para BCS/VICReg loss)
+  dstc: 256           # Dimensión de representación final (output pooled)
 
 loss:
-  # Variance-Covariance regularization
-  cov_coeff: 100.0  # Covariance loss weight
-  std_coeff: 10.0   # Standard deviation loss weight
+  # BCS (Batch Covariance Structure) Loss
+  lmbd: 10.0          # Controla Gaussianidad vs Invarianza
+  # Alternativa: VICReg
+  std_coeff: 10.0     
+  cov_coeff: 100.0    
 
 optim:
   epochs: 50
   lr: 1.0e-3
-
-logging:
-  log_wandb: true
-  wandb_group:        # Set to group runs (e.g., for seed averaging)
-  log_every: 1        # Log every N epochs
-  save_every: 10      # Save checkpoint every N epochs
-  tqdm_silent: false  # Disable tqdm progress bars
+  weight_decay: 0.05  # Necesario para AdamW
 
 training:
-  use_amp: true       # Use automatic mixed precision
-  dtype: float16      # float16 or bfloat16
+  use_amp: true       # Mixed precision
+  dtype: float16
+  ema_decay: 0.996    # Decay para target encoder EMA
 
-# --- Parameters used when running with --full-sweep
-# By default, only the parameters specified above are used
+logging:
+  log_wandb: false    # Cambiar a true si usas wandb
+  wandb_group: 
+  log_every: 1
+  save_every: 5       # Guardar cada 5 épocas
+  tqdm_silent: false
+  exp_dir: "./experiments/stage1"
+
+# Parámetros para sweep (opcional)
 sweep:
-  # Sweep grid for video JEPA hyperparameter search
   param_grid:
     data.batch_size: [32, 64]
-    optim.lr: [0.001, 0.0001, 0.0005]
-    loss.std_coeff: [1, 10, 100, 200]
-    loss.cov_coeff: [1, 10, 100, 200]
+    optim.lr: [0.001, 0.0001]
+    loss.lmbd: [1, 10, 100]
     meta.seed: [1, 1000, 10000]
