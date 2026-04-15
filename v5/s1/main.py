@@ -319,11 +319,10 @@ print(f'{"="*60}\n')
 # Resume from checkpoint if one exists
 import glob
 start_epoch = 1
-ckpts = sorted(glob.glob(os.path.join(CFG.ckpt_dir, 'epoch_*.pt')))
-if ckpts:
-    latest = ckpts[-1]
-    print(f'Resuming from {latest} …')
-    start_epoch = load_checkpoint(latest) + 1
+best_ckpt = os.path.join(CFG.ckpt_dir, 'best.pt')
+if os.path.exists(best_ckpt):
+    print(f'Resuming from best checkpoint …')
+    start_epoch = load_checkpoint(best_ckpt) + 1
     print(f'  starting at epoch {start_epoch}')
 else:
     print('No checkpoint found, starting from scratch.')
@@ -357,11 +356,63 @@ for epoch in range(start_epoch, CFG.n_epochs + 1):
         save_checkpoint('best', val_metrics)
         print(f'  ★ new best val_loss={best_val_loss:.4f}')
 
-    if epoch % 5 == 0:
-        save_checkpoint(epoch, {**train_metrics, **{f'val_{k}': v for k, v in val_metrics.items()}})
-
 print('\nTraining complete.')
 save_checkpoint(CFG.n_epochs, {})
+
+
+
+
+
+
+
+
+# ── Plotting ──────────────────────────────────────────────────────────────────
+import matplotlib
+matplotlib.use('Agg')   # non-interactive backend for scripts
+import matplotlib.pyplot as plt
+
+epochs_range = list(range(1, len(history['train_loss']) + 1))
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+# 1. Train vs Val Loss
+axes[0, 0].plot(epochs_range, history['train_loss'], 'b-o', label='Train Loss', markersize=4)
+axes[0, 0].plot(epochs_range, history['val_loss'],   'r-s', label='Val Loss',   markersize=4)
+axes[0, 0].set_xlabel('Epoch'); axes[0, 0].set_ylabel('Total Loss')
+axes[0, 0].set_title('Stage 1: Train vs Validation Loss')
+axes[0, 0].legend(); axes[0, 0].grid(True, alpha=0.3)
+
+# 2. BCS + Invariance components
+axes[0, 1].plot(epochs_range, history['train_bcs'], 'g-^', label='BCS Loss',        markersize=4)
+if any(v != 0.0 for v in history['train_inv']):
+    axes[0, 1].plot(epochs_range, history['train_inv'], 'm-v', label='Invariance Loss', markersize=4)
+axes[0, 1].set_xlabel('Epoch'); axes[0, 1].set_ylabel('Loss Component')
+axes[0, 1].set_title('BCS Loss Components')
+axes[0, 1].legend(); axes[0, 1].grid(True, alpha=0.3)
+
+# 3. Generalization gap
+gap = [t - v for t, v in zip(history['train_loss'], history['val_loss'])]
+axes[1, 0].plot(epochs_range, gap, 'k--o', markersize=4)
+axes[1, 0].axhline(y=0, color='r', linestyle='-', alpha=0.3)
+axes[1, 0].set_xlabel('Epoch'); axes[1, 0].set_ylabel('Train − Val Loss')
+axes[1, 0].set_title('Generalization Gap (lower = better)')
+axes[1, 0].grid(True, alpha=0.3)
+
+# 4. Relative improvement
+baseline = history['val_loss'][0]
+improvement = [(baseline - v) / baseline * 100 for v in history['val_loss']]
+axes[1, 1].plot(epochs_range, improvement, 'c-s', markersize=4)
+axes[1, 1].set_xlabel('Epoch'); axes[1, 1].set_ylabel('Improvement % over baseline')
+axes[1, 1].set_title('Relative Val Loss Improvement')
+axes[1, 1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plot_path = os.path.join(CFG.ckpt_dir, 'training_curves_stage1.png')
+plt.savefig(plot_path, dpi=150)
+plt.close(fig)
+print(f'\nPlot saved → {plot_path}')
+print(f'Improvement total : {improvement[-1]:.1f}%')
+print(f'Val loss final    : {history["val_loss"][-1]:.4f}')
 
 
 

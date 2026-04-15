@@ -40,6 +40,6 @@ lmbd: 10.0  # Para BCS loss
 
 # Paths (requeridos por dataset y checkpoints)
 cache_dir: '/content/drive/MyDrive/data/cache'
-ckpt_dir: '/content/notebooks_meta/v5/s1/checkpoints'
+ckpt_dir: '/content/drive/MyDrive/metanet/v5/s1/checkpoints'
 raw_data_dir: '/content/data/dailydialog_processed'
 tokenizer_name: 'bert-base-uncased'
