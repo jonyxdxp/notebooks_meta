@@ -416,9 +416,6 @@ print(f'Val loss final    : {history["val_loss"][-1]:.4f}')
 
 
 
-if __name__ == "__main__":
-    run()
-
 
 
 

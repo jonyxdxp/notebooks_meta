@@ -33,12 +33,12 @@ else:
 
 # Crear directorios
 os.makedirs(CFG.logging.exp_dir, exist_ok=True)
-os.makedirs(os.path.join(CFG.logging.exp_dir, "checkpoints"), exist_ok=True)
+os.makedirs(os.path.join(CFG.logging.exp_dir, "/content/drive/MyDrive/metanet/v5/s2/checkpoints"), exist_ok=True)
 
 # Actualizar s1_ckpt si es null
 if CFG.training.s1_ckpt is None or CFG.training.s1_ckpt == "null":
     # Default path a Stage 1
-    CFG.training.s1_ckpt = "/content/notebooks_meta/v5/s1/checkpoints/epoch_best.pt"
+    CFG.training.s1_ckpt = "/content/drive/MyDrive/metanet/v5/s1/checkpoints/epoch_best.pt"
 
 print(f"Config loaded: seed={CFG.meta.seed}, device={DEVICE}")
 print(f"Stage 1 checkpoint: {CFG.training.s1_ckpt}")
