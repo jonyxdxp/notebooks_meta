@@ -24,22 +24,17 @@ data:
   target_span_length: 8 # Para JEPAMaskCollator
 
 model:
-  # ── Encoder (Stage 1 - Congelado) ─────────────────────────────
-  # Parámetros Transformer para context_encoder y target_encoder
-  vocab_size: 256       # Tamaño vocabulario (para tokenización) - AJUSTAR según tu tokenizer
-  hidden_size: 32       # Dimensión oculta D (antes 'henc' en ResNet, ahora dim transformer)
-  num_heads: 4          # Cabezas de atención (necesario para atención multi-cabeza)
-  num_layers: 2         # Capas del encoder
-  max_seq_len: 16       # Máxima longitud de secuencia (redundante pero útil)
+  vocab_size: 30522     # BERT vocab (igual que S1)
+  hidden_size: 256      # igual que S1
+  num_heads: 8          # igual que S1
+  num_layers: 6         # igual que S1 — verificá con CFG de s1
+  max_seq_len: 128      # igual que S1
   
-  # ── Predictor (Stage 2 - Entrenable) ──────────────────────────
-  pred_hidden_size: 32  # Dimensión interna del predictor (equivalente a 'hpre')
-  pred_num_heads: 4     # Cabezas de atención del predictor
-  pred_num_layers: 2    # Capas del predictor
-  action_dim: 0         # Dimensión de acción/control (0 para JEPA puro sin acciones)
+  pred_hidden_size: 256
+  pred_num_heads: 4
+  pred_num_layers: 4
+  dstc: 256             # debe coincidir con hidden_size del encoder
   
-  # ── Proyección (para VICReg/VC Loss) ───────────────────────────
-  dstc: 16              # Dimensión de representación final (output del encoder/proyector)
 
 loss:
   # Variance-Covariance regularization (VICReg)
@@ -63,7 +58,7 @@ logging:
   log_every: 1          # Validar/loggear cada N épocas
   save_every: 10        # Guardar checkpoint cada N épocas
   tqdm_silent: false
-  exp_dir: "./experiments/jepa_stage2"  # AÑADIDO: Directorio para guardar checkpoints
+  exp_dir: "/content/drive/MyDrive/metanet/v5/s2/checkpoints"  # AÑADIDO: Directorio para guardar checkpoints
 
 # --- Parámetros para búsqueda de hiperparámetros (sweep) ---
 sweep:

@@ -96,217 +96,116 @@ dstc = CFG.model.dstc
 projector = Projector(f"{dstc}-{dstc*4}-{dstc*4}").to(DEVICE)
 print(f"Projector: {dstc}-{dstc*4}-{dstc*4}")
 
+
+
+
 # ========================== Loss / Optimizer ==========================
 
-ploss = SquareLossSeq()
-regularizer = VCLoss(
-    std_coeff=CFG.loss.std_coeff,
-    cov_coeff=CFG.loss.cov_coeff,
-    proj=None
-)
+ploss     = torch.nn.MSELoss()
+regularizer = VCLoss(std_coeff=CFG.loss.std_coeff, cov_coeff=CFG.loss.cov_coeff)
 
-# Optimizer: solo predictor + projector
 trainable_params = list(predictor.parameters()) + list(projector.parameters())
-optimizer = AdamW(
-    trainable_params,
-    lr=CFG.optim.lr,
-    weight_decay=CFG.optim.weight_decay,
-)
-
+optimizer = AdamW(trainable_params, lr=CFG.optim.lr, weight_decay=CFG.optim.weight_decay)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer,
-    T_max=CFG.optim.epochs,
-    eta_min=CFG.optim.lr * 0.1,
-)
+    optimizer, T_max=CFG.optim.epochs, eta_min=CFG.optim.lr * 0.1)
 
 # ========================== Helpers ==========================
 
 def masked_pool(hidden, mask):
-    """Mean-pooling usando attention mask (1=real token, 0=padding)"""
-    mask_f = mask.unsqueeze(-1).float()  # (B, L, 1)
-    summed = (hidden * mask_f).sum(dim=1)  # (B, D)
-    count = mask_f.sum(dim=1).clamp(min=1)  # (B, 1)
-    return summed / count
+    mask_f = mask.unsqueeze(-1).float()
+    return (hidden * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
 
 def unpack(batch):
-    """
-    Extrae tensores del batch de pares (Stage 2).
-    Estructura: turn_a (context), turn_b (target)
-    """
     return (
-        batch['input_ids_a'].to(DEVICE),      # Contexto: turno t
-        batch['attention_mask_a'].to(DEVICE), # Mask turno t
-        batch['input_ids_b'].to(DEVICE),      # Target: turno t+1
-        batch['attention_mask_b'].to(DEVICE), # Mask turno t+1
+        batch['context_input_ids'].to(DEVICE),
+        batch['context_attention_mask'].to(DEVICE),
+        batch['target_input_ids'].to(DEVICE),
+        batch['target_attention_mask'].to(DEVICE),
     )
 
-def save_checkpoint(path, model, optimizer, epoch, step, **kwargs):
-    """Guarda checkpoint del predictor"""
-    path = Path(path) if isinstance(path, str) else path
+def forward_step(batch):
+    ctx_ids, ctx_mask, tgt_ids, tgt_mask = unpack(batch)
+
+    with torch.no_grad():
+        ctx_h = context_encoder(ctx_ids, attention_mask=ctx_mask)
+        tgt_h = target_encoder(tgt_ids, attention_mask=tgt_mask)
+        if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
+        if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
+
+    ctx_repr = masked_pool(ctx_h, ctx_mask)   # (B, D)
+    tgt_repr = masked_pool(tgt_h, tgt_mask)   # (B, D)
+
+    ctx_seq = ctx_repr.unsqueeze(1)            # (B, 1, D)
+    c       = torch.zeros_like(ctx_seq)        # conditioning vacío
+    pred    = predictor(ctx_seq, c).squeeze(1) # (B, D)
+
+    pred_proj = projector(pred)
+    tgt_proj  = projector(tgt_repr.detach())
+
+    pred_loss          = ploss(pred_proj, tgt_proj)
+    vc_loss, _, vc_dict = regularizer(pred_proj)
+    loss               = pred_loss + vc_loss
+
+    return {'loss': loss, 'pred_loss': pred_loss, 'vc_loss': vc_loss}
+
+def save_best(epoch, val_loss):
+    path = Path(CFG.logging.exp_dir) / 'best.pt'
     torch.save({
-        'epoch': epoch,
-        'step': step,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        **kwargs
+        'epoch':      epoch,
+        'predictor':  predictor.state_dict(),
+        'projector':  projector.state_dict(),
+        'optimizer':  optimizer.state_dict(),
+        'scheduler':  scheduler.state_dict(),
+        'val_loss':   val_loss,
     }, path)
-    logger.info(f"Saved: {path}")
+    print(f'  ✓ saved → {path}')
 
 @torch.no_grad()
 def validation_loop():
-    """Loop de validación"""
-    predictor.eval()
-    projector.eval()
-    total_loss = 0.0
-    total_pred_loss = 0.0
-    total_vc_loss = 0.0
-    n = 0
-    
+    predictor.eval(); projector.eval()
+    totals = {}; n = 0
     for batch in val_loader:
-        ctx_ids, ctx_mask, tgt_ids, tgt_mask = unpack(batch)
-        
-        # Encode (frozen)
-        ctx_h = context_encoder(ctx_ids, ctx_mask)
-        tgt_h = target_encoder(tgt_ids, tgt_mask)
-        
-        # Pool a representación fija (B, D)
-        ctx_repr = masked_pool(ctx_h, ctx_mask.bool() if ctx_mask.dtype == torch.long else ctx_mask)
-        tgt_repr = masked_pool(tgt_h, tgt_mask.bool() if tgt_mask.dtype == torch.long else tgt_mask)
-        
-        # Predictor: predice tgt_repr desde ctx_repr
-        # Nota: DM espera (B, T, D), adaptamos dims si es necesario
-        if ctx_repr.dim() == 2:
-            ctx_repr = ctx_repr.unsqueeze(1)  # (B, 1, D) -> tratar como seq len 1
-        
-        pred = predictor(ctx_repr)  # (B, T, D) o (B, D)
-        if pred.dim() == 3:
-            pred = pred.squeeze(1)  # Volver a (B, D)
-        
-        # Proyectar
-        pred_proj = projector(pred)
-        tgt_proj = projector(tgt_repr)
-        
-        # Losses
-        pred_loss = ploss(pred_proj, tgt_proj)
-        vc_loss = regularizer(pred_proj)
-        loss = pred_loss + vc_loss
-        
-        total_loss += loss.item()
-        total_pred_loss += pred_loss.item()
-        total_vc_loss += vc_loss.item()
+        d = forward_step(batch)
+        for k, v in d.items():
+            totals[k] = totals.get(k, 0.0) + v.item()
         n += 1
-    
-    predictor.train()
-    projector.train()
-    
-    return {
-        'loss': total_loss / max(n, 1),
-        'pred_loss': total_pred_loss / max(n, 1),
-        'vc_loss': total_vc_loss / max(n, 1),
-    }
+    predictor.train(); projector.train()
+    return {k: v/n for k, v in totals.items()}
 
 # ========================== Training Loop ==========================
 
-logger.info(f"Starting Stage 2: {CFG.optim.epochs} epochs")
-global_step = 0
 best_val_loss = float('inf')
+Path(CFG.logging.exp_dir).mkdir(parents=True, exist_ok=True)
 
-for epoch in range(start_epoch, CFG.optim.epochs):
-    predictor.train()
-    projector.train()
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
-    
-    epoch_loss = 0.0
-    epoch_pred = 0.0
-    epoch_vc = 0.0
-    n_batches = 0
-    
+for epoch in range(1, CFG.optim.epochs + 1):
+    predictor.train(); projector.train()
+    totals = {}; n = 0
+
+    pbar = tqdm(train_loader, desc=f'Epoch {epoch:02d}', leave=False)
     for batch in pbar:
-        ctx_ids, ctx_mask, tgt_ids, tgt_mask = unpack(batch)
-        
-        optimizer.zero_grad()
-
-        # Encode (frozen)
-        with torch.no_grad():
-            ctx_h = context_encoder(ctx_ids, ctx_mask)
-            tgt_h = target_encoder(tgt_ids, tgt_mask)
-
-        # Pool a (B, D)
-        ctx_repr = masked_pool(ctx_h, ctx_mask.bool() if ctx_mask.dtype == torch.long else ctx_mask)
-        tgt_repr = masked_pool(tgt_h, tgt_mask.bool() if tgt_mask.dtype == torch.long else tgt_mask)
-
-        # Predictor: adaptar dims si es necesario (DM espera 3D)
-        if ctx_repr.dim() == 2:
-            ctx_seq = ctx_repr.unsqueeze(1)  # (B, 1, D)
-        else:
-            ctx_seq = ctx_repr
-        
-        pred = predictor(ctx_seq)
-        if pred.dim() == 3:
-            pred = pred.squeeze(1)  # (B, D)
-
-        # Proyectar
-        pred_proj = projector(pred)
-        tgt_proj = projector(tgt_repr)
-
-        # Losses
-        pred_loss = ploss(pred_proj, tgt_proj)
-        vc_loss = regularizer(pred_proj)
-        loss = pred_loss + vc_loss
-
-        loss.backward()
+        d = forward_step(batch)
+        d['loss'].backward()
         torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
-        optimizer.step()
+        optimizer.step(); optimizer.zero_grad()
+        for k, v in d.items():
+            totals[k] = totals.get(k, 0.0) + v.item()
+        n += 1
+        pbar.set_postfix({k: f'{v.item():.4f}' for k, v in d.items()})
 
-        # Logging
-        epoch_loss += loss.item()
-        epoch_pred += pred_loss.item()
-        epoch_vc += vc_loss.item()
-        n_batches += 1
-        
-        pbar.set_postfix({
-            "loss": f"{loss.item():.4f}",
-            "pred": f"{pred_loss.item():.4f}",
-            "vc": f"{vc_loss.item():.4f}",
-        })
-        global_step += 1
-
-    # Epoch stats
-    avg_loss = epoch_loss / n_batches
-    avg_pred = epoch_pred / n_batches
-    avg_vc = epoch_vc / n_batches
-    
     scheduler.step()
-    
-    # Validation
-    if epoch % CFG.logging.log_every == 0:
-        val_metrics = validation_loop()
-        logger.info(
-            f"Epoch {epoch}/{CFG.optim.epochs} | "
-            f"Train Loss: {avg_loss:.4f} (P:{avg_pred:.4f} VC:{avg_vc:.4f}) | "
-            f"Val Loss: {val_metrics['loss']:.4f}"
-        )
-        
-        if val_metrics['loss'] < best_val_loss:
-            best_val_loss = val_metrics['loss']
-            save_checkpoint(
-                exp_dir / "best.pth.tar",
-                model=predictor,
-                optimizer=optimizer,
-                epoch=epoch,
-                step=global_step,
-                val_loss=best_val_loss
-            )
-            logger.info(f"★ New best model: {best_val_loss:.4f}")
+    train_avg = {k: v/n for k, v in totals.items()}
+    val_avg   = validation_loop()
 
-    # Checkpoint periódico
-    if epoch % CFG.logging.save_every == 0 and epoch > 0:
-        save_checkpoint(
-            exp_dir / f"epoch_{epoch:03d}.pth.tar",
-            model=predictor,
-            optimizer=optimizer,
-            epoch=epoch,
-            step=global_step,
-        )
+    print(
+        f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
+        f'train={train_avg["loss"]:.4f} (pred={train_avg["pred_loss"]:.4f} vc={train_avg["vc_loss"]:.4f})  '
+        f'val={val_avg["loss"]:.4f}  '
+        f'lr={optimizer.param_groups[0]["lr"]:.2e}'
+    )
 
-logger.info("Stage 2 complete!")
+    if val_avg['loss'] < best_val_loss:
+        best_val_loss = val_avg['loss']
+        save_best(epoch, best_val_loss)
+        print(f'  ★ new best val_loss={best_val_loss:.4f}')
+
+print('\nStage 2 complete.')
