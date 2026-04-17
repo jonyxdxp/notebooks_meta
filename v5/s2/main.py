@@ -42,8 +42,8 @@ def _load_module(name, filepath):
     spec.loader.exec_module(mod)
     return mod
 
-_dataset    = _load_module('s1_dataset',    f'{S1}/data/dataset.py')
-_dataloader = _load_module('s1_dataloader', f'{S1}/data/dataloader.py')
+_dataset    = _load_module('data.dataset',    f'{S1}/data/dataset.py')
+_dataloader = _load_module('data.dataloader', f'{S1}/data/dataloader.py')
 
 get_jepa_dataloaders = _dataloader.get_jepa_dataloaders
 VOCAB_SIZE            = _dataset.VOCAB_SIZE
