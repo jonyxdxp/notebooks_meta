@@ -68,8 +68,9 @@ def extract_representations(
     all_reps, all_labels = [], []
 
     for batch in tqdm(loader, desc='Extracting reps', leave=False):
-        ids  = batch['input_ids'].to(device)
-        mask = batch['attention_mask'].to(device)
+        # DESPUÉS
+        ids  = batch.get('input_ids', batch.get('context_input_ids')).to(device)
+        mask = batch.get('attention_mask', batch.get('context_attention_mask')).to(device)
 
         hidden = encoder(ids, attention_mask=mask)
         if isinstance(hidden, tuple):
