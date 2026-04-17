@@ -1,108 +1,103 @@
 #!/usr/bin/env python3
 """
 Stage 2: Entrenamiento del Predictor JEPA (Turn Pair Prediction)
-Predice el siguiente turno (t+1) desde el turno actual (t)
 """
 
 import sys
 import os
+import copy
+import importlib.util
 from pathlib import Path
 
 import torch
 from torch.optim import AdamW
 from tqdm import tqdm
 import logging
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Importar config de Stage 2 (estructura anidada)
-sys.path.insert(0, '/content/notebooks_meta/v5/s2')
-from config import CFG, DEVICE
+# ── Paths ─────────────────────────────────────────────────────────────────────
+ROOT = '/content/notebooks_meta'
+S1   = f'{ROOT}/v5/s1'
+S2   = f'{ROOT}/v5/s2'
+sys.path.insert(0, ROOT)
 
-# Imports del proyecto
-sys.path.insert(0, '/content/notebooks_meta')
+# ── Config de S2 (explícito para no pisar s1/config.py) ──────────────────────
+from v5.s2.config import CFG, DEVICE
 
+# ── Arquitecturas ─────────────────────────────────────────────────────────────
 from v5.s1.cog_arch.encoder import Encoder
 from v5.s2.cog_arch.dm import DM, Projector
-from v5.s2.losses import SquareLossSeq, VCLoss
-from v5.s1.data.dataloader import get_jepa_dataloaders
-from v5.s1.data.dataset import VOCAB_SIZE, tokenizer
+from v5.s2.losses import VCLoss
 
-import copy
+# ── Data: carga con importlib para evitar conflicto v5/s1/data vs v5/s2/data ──
+def _load_module(name, filepath):
+    spec = importlib.util.spec_from_file_location(name, filepath)
+    mod  = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
-# Variables globales
-wandb_run = CFG.logging.log_wandb if hasattr(CFG.logging, 'log_wandb') else False
-start_epoch = 0
-exp_dir = Path(CFG.logging.exp_dir)
-exp_dir.mkdir(parents=True, exist_ok=True)
+_dataset    = _load_module('s1_dataset',    f'{S1}/data/dataset.py')
+_dataloader = _load_module('s1_dataloader', f'{S1}/data/dataloader.py')
+
+get_jepa_dataloaders = _dataloader.get_jepa_dataloaders
+VOCAB_SIZE            = _dataset.VOCAB_SIZE
+tokenizer             = _dataset.tokenizer
 
 # ========================== Dataloaders ==========================
 
-train_loader, val_loader = get_jepa_dataloaders(
-    cfg_obj=CFG,
-    tokenizer=tokenizer,
-)
-
+train_loader, val_loader = get_jepa_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
 print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
 
 # ========================== Models ==========================
 
-# 1. Encoders congelados desde Stage 1
 context_encoder = Encoder(
-    vocab_size=CFG.model.vocab_size,
-    hidden_size=CFG.model.hidden_size,
-    num_heads=CFG.model.num_heads,
-    num_layers=CFG.model.num_layers,
-    max_seq_len=CFG.model.max_seq_len,
+    vocab_size  = CFG.model.vocab_size,
+    hidden_size = CFG.model.hidden_size,
+    num_heads   = CFG.model.num_heads,
+    num_layers  = CFG.model.num_layers,
+    max_seq_len = CFG.model.max_seq_len,
 ).to(DEVICE)
-
 target_encoder = copy.deepcopy(context_encoder).to(DEVICE)
 
 # Cargar checkpoint Stage 1
-if os.path.exists(CFG.training.s1_ckpt):
-    s1_ckpt = torch.load(CFG.training.s1_ckpt, map_location=DEVICE)
-    context_encoder.load_state_dict(s1_ckpt['context_encoder'])
-    target_encoder.load_state_dict(s1_ckpt['target_encoder'])
-    print(f"✓ Loaded Stage 1 from {CFG.training.s1_ckpt} (epoch {s1_ckpt.get('epoch', 'unknown')})")
-else:
-    raise FileNotFoundError(f"Stage 1 checkpoint not found: {CFG.training.s1_ckpt}")
+s1_ckpt = torch.load(CFG.training.s1_ckpt, map_location=DEVICE, weights_only=False)
+context_encoder.load_state_dict(s1_ckpt['context_encoder'])
+target_encoder.load_state_dict(s1_ckpt['target_encoder'])
+print(f"✓ S1 checkpoint cargado (epoch {s1_ckpt.get('epoch', '?')})")
 
-# Freeze encoders
 for enc in (context_encoder, target_encoder):
     enc.eval()
     for p in enc.parameters():
         p.requires_grad = False
 print("Encoders frozen.")
 
-# 2. Predictor (DM adaptado para secuencias)
-# NOTA: DM espera: num_frames, depth, heads, mlp_dim, input_dim, hidden_dim...
 predictor = DM(
-    num_frames=CFG.model.max_seq_len,
-    depth=CFG.model.pred_num_layers,
-    heads=CFG.model.pred_num_heads,
-    mlp_dim=CFG.model.pred_hidden_size * 4,  # mlp_dim suele ser 4x hidden
-    input_dim=CFG.model.dstc,  # Dimensión de entrada (la representación pooled del encoder)
-    hidden_dim=CFG.model.pred_hidden_size,
-    output_dim=CFG.model.dstc,  # Predice representación del siguiente turno
-    dim_head=64,
-    dropout=0.1,
-    emb_dropout=0.1,
+    num_frames = CFG.model.max_seq_len,
+    depth      = CFG.model.pred_num_layers,
+    heads      = CFG.model.pred_num_heads,
+    mlp_dim    = CFG.model.pred_hidden_size * 4,
+    input_dim  = CFG.model.dstc,
+    hidden_dim = CFG.model.pred_hidden_size,
+    output_dim = CFG.model.dstc,
+    dim_head   = 64,
+    dropout    = 0.1,
+    emb_dropout= 0.1,
 ).to(DEVICE)
-
 print(f"Predictor params: {sum(p.numel() for p in predictor.parameters()):,}")
 
-# 3. Projector (VICReg/VC)
-dstc = CFG.model.dstc
+dstc      = CFG.model.dstc
 projector = Projector(f"{dstc}-{dstc*4}-{dstc*4}").to(DEVICE)
 print(f"Projector: {dstc}-{dstc*4}-{dstc*4}")
 
-
-
-
 # ========================== Loss / Optimizer ==========================
 
-ploss     = torch.nn.MSELoss()
+ploss       = torch.nn.MSELoss()
 regularizer = VCLoss(std_coeff=CFG.loss.std_coeff, cov_coeff=CFG.loss.cov_coeff)
 
 trainable_params = list(predictor.parameters()) + list(projector.parameters())
@@ -133,31 +128,30 @@ def forward_step(batch):
         if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
         if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
 
-    ctx_repr = masked_pool(ctx_h, ctx_mask)   # (B, D)
-    tgt_repr = masked_pool(tgt_h, tgt_mask)   # (B, D)
+    ctx_repr = masked_pool(ctx_h, ctx_mask)
+    tgt_repr = masked_pool(tgt_h, tgt_mask)
 
-    ctx_seq = ctx_repr.unsqueeze(1)            # (B, 1, D)
-    c       = torch.zeros_like(ctx_seq)        # conditioning vacío
-    pred    = predictor(ctx_seq, c).squeeze(1) # (B, D)
+    ctx_seq = ctx_repr.unsqueeze(1)             # (B, 1, D)
+    c       = torch.zeros_like(ctx_seq)         # conditioning vacío
+    pred    = predictor(ctx_seq, c).squeeze(1)  # (B, D)
 
-    pred_proj = projector(pred)
-    tgt_proj  = projector(tgt_repr.detach())
-
-    pred_loss          = ploss(pred_proj, tgt_proj)
-    vc_loss, _, vc_dict = regularizer(pred_proj)
-    loss               = pred_loss + vc_loss
+    pred_proj            = projector(pred)
+    tgt_proj             = projector(tgt_repr.detach())
+    pred_loss            = ploss(pred_proj, tgt_proj)
+    vc_loss, _, _        = regularizer(pred_proj)
+    loss                 = pred_loss + vc_loss
 
     return {'loss': loss, 'pred_loss': pred_loss, 'vc_loss': vc_loss}
 
 def save_best(epoch, val_loss):
     path = Path(CFG.logging.exp_dir) / 'best.pt'
     torch.save({
-        'epoch':      epoch,
-        'predictor':  predictor.state_dict(),
-        'projector':  projector.state_dict(),
-        'optimizer':  optimizer.state_dict(),
-        'scheduler':  scheduler.state_dict(),
-        'val_loss':   val_loss,
+        'epoch':     epoch,
+        'predictor': predictor.state_dict(),
+        'projector': projector.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
+        'val_loss':  val_loss,
     }, path)
     print(f'  ✓ saved → {path}')
 
@@ -175,10 +169,32 @@ def validation_loop():
 
 # ========================== Training Loop ==========================
 
+history = {'train_loss': [], 'train_pred': [], 'train_vc': [],
+           'val_loss':   [], 'val_pred':   [], 'val_vc':   []}
+
 best_val_loss = float('inf')
 Path(CFG.logging.exp_dir).mkdir(parents=True, exist_ok=True)
 
-for epoch in range(1, CFG.optim.epochs + 1):
+# Resume desde best si existe
+best_ckpt = Path(CFG.logging.exp_dir) / 'best.pt'
+start_epoch = 1
+if best_ckpt.exists():
+    ckpt = torch.load(best_ckpt, map_location=DEVICE, weights_only=False)
+    predictor.load_state_dict(ckpt['predictor'])
+    projector.load_state_dict(ckpt['projector'])
+    optimizer.load_state_dict(ckpt['optimizer'])
+    scheduler.load_state_dict(ckpt['scheduler'])
+    best_val_loss = ckpt['val_loss']
+    start_epoch   = ckpt['epoch'] + 1
+    print(f'Resumiendo desde epoch {ckpt["epoch"]}  val_loss={best_val_loss:.4f}')
+else:
+    print('Sin checkpoint previo, empezando desde cero.')
+
+print(f'\n{"="*60}')
+print(f'  Text JEPA S2 — {CFG.optim.epochs} epochs   device={DEVICE}')
+print(f'{"="*60}\n')
+
+for epoch in range(start_epoch, CFG.optim.epochs + 1):
     predictor.train(); projector.train()
     totals = {}; n = 0
 
@@ -194,19 +210,48 @@ for epoch in range(1, CFG.optim.epochs + 1):
         pbar.set_postfix({k: f'{v.item():.4f}' for k, v in d.items()})
 
     scheduler.step()
-    train_avg = {k: v/n for k, v in totals.items()}
-    val_avg   = validation_loop()
+    tr = {k: v/n for k, v in totals.items()}
+    vl = validation_loop()
+
+    history['train_loss'].append(tr['loss'].item() if torch.is_tensor(tr['loss']) else tr['loss'])
+    history['train_pred'].append(tr['pred_loss'].item() if torch.is_tensor(tr['pred_loss']) else tr['pred_loss'])
+    history['train_vc'].append(tr['vc_loss'].item() if torch.is_tensor(tr['vc_loss']) else tr['vc_loss'])
+    history['val_loss'].append(vl['loss'])
+    history['val_pred'].append(vl['pred_loss'])
+    history['val_vc'].append(vl['vc_loss'])
 
     print(
         f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
-        f'train={train_avg["loss"]:.4f} (pred={train_avg["pred_loss"]:.4f} vc={train_avg["vc_loss"]:.4f})  '
-        f'val={val_avg["loss"]:.4f}  '
+        f'train={tr["loss"]:.4f} (pred={tr["pred_loss"]:.4f} vc={tr["vc_loss"]:.4f})  '
+        f'val={vl["loss"]:.4f}  '
         f'lr={optimizer.param_groups[0]["lr"]:.2e}'
     )
 
-    if val_avg['loss'] < best_val_loss:
-        best_val_loss = val_avg['loss']
+    if vl['loss'] < best_val_loss:
+        best_val_loss = vl['loss']
         save_best(epoch, best_val_loss)
         print(f'  ★ new best val_loss={best_val_loss:.4f}')
 
 print('\nStage 2 complete.')
+
+# ── Plotting ──────────────────────────────────────────────────────────────────
+epochs_range = list(range(1, len(history['train_loss']) + 1))
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+axes[0].plot(epochs_range, history['train_loss'], 'b-o', label='Train', markersize=4)
+axes[0].plot(epochs_range, history['val_loss'],   'r-s', label='Val',   markersize=4)
+axes[0].set_title('Total Loss'); axes[0].legend(); axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(epochs_range, history['train_pred'], 'g-^', label='Train pred', markersize=4)
+axes[1].plot(epochs_range, history['val_pred'],   'm-v', label='Val pred',   markersize=4)
+axes[1].set_title('Prediction Loss (MSE)'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+
+axes[2].plot(epochs_range, history['train_vc'], 'c-o', label='Train VC', markersize=4)
+axes[2].plot(epochs_range, history['val_vc'],   'k-s', label='Val VC',   markersize=4)
+axes[2].set_title('VC Regularization Loss'); axes[2].legend(); axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plot_path = Path(CFG.logging.exp_dir) / 'training_curves_stage2.png'
+plt.savefig(plot_path, dpi=150); plt.close(fig)
+print(f'Plot saved → {plot_path}')
+print(f'Best val_loss: {best_val_loss:.4f}')
