@@ -34,24 +34,13 @@ from v5.s1.cog_arch.encoder import Encoder
 from v5.s2.cog_arch.dm import DM, Projector
 from v5.s2.losses import VCLoss
 
-# ── Data: carga con importlib para evitar conflicto v5/s1/data vs v5/s2/data ──
-def _load_module(name, filepath):
-    spec = importlib.util.spec_from_file_location(name, filepath)
-    mod  = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
+from v5.s2.data.dataset import VOCAB_SIZE, tokenizer
+from v5.s2.data.dataloader import get_stage2_dataloaders
 
-_dataset    = _load_module('data.dataset',    f'{S1}/data/dataset.py')
-_dataloader = _load_module('data.dataloader', f'{S1}/data/dataloader.py')
-
-get_jepa_dataloaders = _dataloader.get_jepa_dataloaders
-VOCAB_SIZE            = _dataset.VOCAB_SIZE
-tokenizer             = _dataset.tokenizer
 
 # ========================== Dataloaders ==========================
 
-train_loader, val_loader = get_jepa_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
+train_loader, val_loader = get_stage2_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
 print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
 
 # ========================== Models ==========================
@@ -113,10 +102,10 @@ def masked_pool(hidden, mask):
 
 def unpack(batch):
     return (
-        batch['context_input_ids'].to(DEVICE),
-        batch['context_attention_mask'].to(DEVICE),
-        batch['target_input_ids'].to(DEVICE),
-        batch['target_attention_mask'].to(DEVICE),
+        batch['input_ids_a'].to(DEVICE),
+        batch['attention_mask_a'].to(DEVICE),
+        batch['input_ids_b'].to(DEVICE),
+        batch['attention_mask_b'].to(DEVICE),
     )
 
 def forward_step(batch):
