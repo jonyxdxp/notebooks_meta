@@ -49,38 +49,22 @@ class LinearProbe(nn.Module):
 # ── Extract representations ───────────────────────────────────────────────────
 
 @torch.no_grad()
-def extract_representations(
-    encoder,
-    loader: DataLoader,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Run encoder over the full loader, return (representations, labels).
-
-    Expects each batch to be a dict with keys:
-        input_ids, attention_mask, labels   (labels can be -1 if unavailable)
-
-    Returns:
-        reps   : (N, D)
-        labels : (N,)
-    """
+def extract_representations(encoder, loader, device):
     encoder.eval()
     all_reps, all_labels = [], []
 
     for batch in tqdm(loader, desc='Extracting reps', leave=False):
-        # DESPUÉS
-        ids  = batch.get('input_ids', batch.get('context_input_ids')).to(device)
-        mask = batch.get('attention_mask', batch.get('context_attention_mask')).to(device)
+        ids  = batch['context_input_ids'].to(device)
+        mask = batch['context_attention_mask'].to(device)
 
         hidden = encoder(ids, attention_mask=mask)
         if isinstance(hidden, tuple):
-            hidden = hidden[0]                         # (B, L, D)
+            hidden = hidden[0]
 
-        reps = mean_pool(hidden, mask)                 # (B, D)
+        reps = mean_pool(hidden, mask)
         all_reps.append(reps.cpu())
-
-        labels = batch.get('labels', torch.full((ids.size(0),), -1))
-        all_labels.append(labels.cpu())
+        # No labels in JEPA loader — fill with -1
+        all_labels.append(torch.full((ids.size(0),), -1))
 
     return torch.cat(all_reps), torch.cat(all_labels)
 
