@@ -21,12 +21,13 @@ sys.path.insert(0, '/content/notebooks_meta/v5/s2')
 from config import CFG, DEVICE
 
 # Imports del proyecto
-sys.path.insert(0, '/content/notebooks_meta/v5/s1')
-from cog_arch.encoder import Encoder
-from cog_arch.dm import DM, Projector
-from losses import SquareLossSeq, VCLoss
-from data.dataloader import get_jepa_dataloaders
-from data.dataset import VOCAB_SIZE, tokenizer
+sys.path.insert(0, '/content/notebooks_meta')
+
+from v5.s1.cog_arch.encoder import Encoder
+from v5.s2.cog_arch.dm import DM, Projector
+from v5.s2.losses import SquareLossSeq, VCLoss
+from v5.s1.data.dataloader import get_jepa_dataloaders
+from v5.s1.data.dataset import VOCAB_SIZE, tokenizer
 
 import copy
 
