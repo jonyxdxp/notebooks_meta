@@ -4,11 +4,11 @@ import torch
 from typing import Optional
 
 # Importar desde el dataset de Stage 2 (turn pairs)
-from data.dataset import (
-    get_turn_pair_dataset, 
-    TurnPairCollator, 
+from v5.s2.data.dataset import (
+    get_turn_pair_dataset,
+    TurnPairCollator,
     tokenizer,
-    CFG  # El CFG local de Stage 2 si lo necesitas
+    CFG
 )
 
 def get_stage2_dataloaders(
