@@ -81,7 +81,7 @@ predictor = DM(
 print(f"Predictor params: {sum(p.numel() for p in predictor.parameters()):,}")
 
 dstc      = CFG.model.dstc
-projector = Projector(f"{dstc}-{dstc*4}-{dstc*4}").to(DEVICE)
+projector = Projector(f"{dstc}-{dstc*2}-{dstc}").to(DEVICE)
 print(f"Projector: {dstc}-{dstc*4}-{dstc*4}")
 
 # ========================== Loss / Optimizer ==========================

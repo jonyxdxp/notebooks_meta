@@ -35,19 +35,19 @@ model:
   max_seq_len: 128
   pred_hidden_size: 256
   pred_num_heads: 4
-  pred_num_layers: 4
+  pred_num_layers: 2    # era 4 — más simple
   dstc: 256
   
 
 loss:
   # Variance-Covariance regularization (VICReg)
-  std_coeff: 10.0       # Pérdida de desviación estándar
-  cov_coeff: 100.0      # Pérdida de covarianza (off-diagonal)
+  std_coeff: 1.0        # era 10.0
+  cov_coeff: 1.0        # era 100.0 — este era el culpable principal
 
 optim:
-  epochs: 50
-  lr: 0.001
-  weight_decay: 0.05    # AÑADIDO: regularización L2 (necesario para AdamW)
+  epochs: 30
+  lr: 0.0001            # era 0.001 — 10x más bajo
+  weight_decay: 0.05
 
 training:
   use_amp: true         # Mixed precision
