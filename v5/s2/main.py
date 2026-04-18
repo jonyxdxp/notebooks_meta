@@ -93,12 +93,28 @@ trainable_params = list(predictor.parameters()) + list(projector.parameters())
 optimizer = AdamW(trainable_params, lr=CFG.optim.lr, weight_decay=CFG.optim.weight_decay)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=CFG.optim.epochs, eta_min=CFG.optim.lr * 0.1)
-
 # ========================== Helpers ==========================
 
-def masked_pool(hidden, mask):
-    mask_f = mask.unsqueeze(-1).float()
-    return (hidden * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1)
+def project_seq(projector, x):
+    """
+    Aplica el projector a una secuencia (B, L, D).
+    BatchNorm1d espera (N, D) — reshapeamos, proyectamos, volvemos.
+    """
+    B, L, D = x.shape
+    x_flat  = x.reshape(B * L, D)          # (B*L, D)
+    out     = projector(x_flat)             # (B*L, D')
+    return out.reshape(B, L, -1)            # (B, L, D')
+
+def seq_mse_loss(pred, target, mask):
+    """
+    MSE solo en posiciones no-padding.
+    pred, target : (B, L, D)
+    mask         : (B, L) — 1 = token real, 0 = padding
+    """
+    mask_f = mask.unsqueeze(-1).float()     # (B, L, 1)
+    diff   = (pred - target) ** 2           # (B, L, D)
+    loss   = (diff * mask_f).sum() / (mask_f.sum() * pred.size(-1) + 1e-9)
+    return loss
 
 def unpack(batch):
     return (
@@ -116,21 +132,27 @@ def forward_step(batch):
         tgt_h = target_encoder(tgt_ids, attention_mask=tgt_mask)
         if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
         if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
+    # ctx_h, tgt_h : (B, L, D)
 
-    ctx_repr = masked_pool(ctx_h, ctx_mask)
-    tgt_repr = masked_pool(tgt_h, tgt_mask)
+    # Predictor: secuencia completa, condicionado por sí mismo
+    pred = predictor(ctx_h, ctx_h)          # (B, L, D)
 
-    ctx_seq = ctx_repr.unsqueeze(1)             # (B, 1, D)
-    c       = torch.zeros_like(ctx_seq)         # conditioning vacío
-    pred    = predictor(ctx_seq, c).squeeze(1)  # (B, D)
+    # Proyectar secuencias completas
+    pred_proj = project_seq(projector, pred)            # (B, L, D')
+    tgt_proj  = project_seq(projector, tgt_h.detach()) # (B, L, D')
 
-    pred_proj            = projector(pred)
-    tgt_proj             = projector(tgt_repr.detach())
-    pred_loss            = ploss(pred_proj, tgt_proj)
-    vc_loss, _, _        = regularizer(pred_proj)
-    loss                 = pred_loss + vc_loss
+    # Loss solo en tokens reales del target
+    pred_loss           = seq_mse_loss(pred_proj, tgt_proj, tgt_mask)
 
+    # VC loss: aplanar a (B*L, D') filtrando padding
+    B, L, Dp = pred_proj.shape
+    mask_flat = tgt_mask.reshape(B * L).bool()
+    pred_flat = pred_proj.reshape(B * L, Dp)[mask_flat]  # solo tokens reales
+    vc_loss, _, _ = regularizer(pred_flat)
+
+    loss = pred_loss + vc_loss
     return {'loss': loss, 'pred_loss': pred_loss, 'vc_loss': vc_loss}
+
 
 def save_best(epoch, val_loss):
     path = Path(CFG.logging.exp_dir) / 'best.pt'
