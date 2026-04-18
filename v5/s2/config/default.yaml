@@ -33,10 +33,14 @@ model:
   num_heads: 4        # S1 usó 4, no 8
   num_layers: 4       # S1 usó 4, no 6
   max_seq_len: 128
-  pred_hidden_size: 256
+  pred_hidden_size: 128 # era 256
   pred_num_heads: 4
-  pred_num_layers: 2    # era 4 — más simple
+  pred_num_layers: 1    # era 2
   dstc: 256
+
+    
+  
+  
   
 
 loss:
@@ -45,9 +49,9 @@ loss:
   cov_coeff: 1.0        # era 100.0 — este era el culpable principal
 
 optim:
-  epochs: 30
-  lr: 0.0001            # era 0.001 — 10x más bajo
-  weight_decay: 0.05
+  epochs: 20            # no tiene sentido seguir 30 épocas si el best es epoch 3
+  lr: 0.0001
+  weight_decay: 0.1     # era 0.05
 
 training:
   use_amp: true         # Mixed precision
