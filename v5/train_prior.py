@@ -94,21 +94,12 @@ class PriorEncoder(nn.Module):
         std = (0.5 * logvar).exp()
         return mu + std * torch.randn_like(std)
 
-
 class LatentExpander(nn.Module):
-    """
-    f_exp: z_t (B, latent_dim) → (B, D)
-    Projects z_t to S1 representation space.
-    Trained to reconstruct the residual Z_T_real - Z_C_pred.
-    """
     def __init__(self, latent_dim=32, output_dim=256):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(latent_dim, output_dim),
-            nn.LayerNorm(output_dim),
-            nn.GELU(),
-            nn.Linear(output_dim, output_dim),
-        )
+        # Remove LayerNorm and GELU — linear only
+        # Forces f_exp to rely on z_t content, not its own capacity
+        self.net = nn.Linear(latent_dim, output_dim)
 
     def forward(self, z_t):
         return self.net(z_t)
@@ -281,9 +272,11 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=30, eta_min=1e-4
 )
 
-def get_beta(epoch, warmup=15, beta_max=0.5):
-    # Start at 0, reach 0.5 over 15 epochs
-    return min(beta_max, beta_max * epoch / warmup)
+def get_beta(epoch, start_kl=10, warmup=10, beta_max=0.1):
+    if epoch < start_kl:
+        return 0.0        # pure autoencoder — no KL at all
+    else:
+        return min(beta_max, beta_max * (epoch - start_kl) / warmup)
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
