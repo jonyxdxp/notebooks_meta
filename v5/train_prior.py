@@ -1,7 +1,7 @@
 # v5/s2/train_prior.py
 """
 Train the prior encoder independently.
-S1 and S2 stay completely frozen.
+S1 and S2 stay completely frozen.hh
 """
 
 import sys
