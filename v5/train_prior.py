@@ -25,7 +25,7 @@ sys.path.insert(0, ROOT)
 
 from v5.s2.config import CFG, DEVICE
 from v5.s1.cog_arch.encoder import Encoder
-from v5.s2.prior_encoder import PriorEncoder, prior_loss
+from v5.prior_encoder import PriorEncoder, prior_loss
 
 def _load_module(name, filepath):
     spec = importlib.util.spec_from_file_location(name, filepath)
