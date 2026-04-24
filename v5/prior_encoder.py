@@ -84,26 +84,15 @@ class PriorEncoder(nn.Module):
         z_ref = mu + sigma * torch.randn_like(mu)
         return z_ref   # (n, z_dim)
 
-
-def prior_loss(mu, sigma, Z_T_real, beta=1.0):
+def prior_loss(mu, sigma, Z_T_real, beta=0.0):
     """
-    Train prior to cover the distribution of real Z_T values.
-
-    NLL  : sampled z_ref should be close to real targets
-    KL   : distribution stays close to N(0,I) for clean sampling
+    For unconditional prior: just NLL, no KL.
+    KL toward N(0,I) is wrong here — Z_T lives at norm ~12, not 0.
     """
-    # NLL under Gaussian: how well does N(μ,σ) cover Z_T_real
     nll = 0.5 * (
         ((Z_T_real - mu) / sigma).pow(2)
         + sigma.pow(2).log()
         + torch.log(torch.tensor(2 * 3.14159))
     ).sum(dim=-1).mean()
 
-    # KL[N(μ,σ) || N(0,I)]
-    kl = -0.5 * (
-        1 + sigma.pow(2).log()
-        - mu.pow(2)
-        - sigma.pow(2)
-    ).sum(dim=-1).mean()
-
-    return nll + beta * kl, nll, kl
+    return nll, nll, torch.tensor(0.0)
