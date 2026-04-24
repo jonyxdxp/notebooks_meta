@@ -121,8 +121,11 @@ def prior_encoder_loss(mu, logvar, Z_T_real, Z_C_pred, z_t, f_exp, beta):
     z_t_expanded = f_exp(z_t)
     recon_loss   = F.mse_loss(z_t_expanded, residual)
     
-    # Standard KL — no free bits
     kl_loss = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=-1).mean()
+    
+    # Soft cap: don't let KL explode above 20 per sample
+    # This prevents the encoder from spreading arbitrarily far from prior
+    kl_loss = torch.clamp(kl_loss, max=20.0)
     
     return recon_loss + beta * kl_loss, recon_loss, kl_loss
 
@@ -272,11 +275,11 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=30, eta_min=1e-4
 )
 
-def get_beta(epoch, start_kl=10, warmup=10, beta_max=0.1):
-    if epoch < start_kl:
-        return 0.0        # pure autoencoder — no KL at all
-    else:
-        return min(beta_max, beta_max * (epoch - start_kl) / warmup)
+def get_beta(epoch, warmup=25, beta_max=0.05):
+    # Linear from 0.001 to 0.05 over 25 epochs
+    # Never zero — KL always has some pressure
+    beta_min = 0.001
+    return beta_min + (beta_max - beta_min) * min(1.0, epoch / warmup)
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
