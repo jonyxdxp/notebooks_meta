@@ -126,19 +126,13 @@ def kl_with_free_bits(mu, logvar, free_bits=0.5):
     return kl_per_dim.sum(dim=-1).mean()
 
 def prior_encoder_loss(mu, logvar, Z_T_real, Z_C_pred, z_t, f_exp, beta):
-    """
-    z_t must encode the RESIDUAL — what S2 couldn't predict.
-    This prevents posterior collapse:
-      mean(residual) = 0, so f_exp can't cheat with a constant output.
-
-    recon: f_exp(z_t) ≈ Z_T_real - Z_C_pred
-    kl:    q(z_t | Z_T_real) → N(0,I)
-    """
-    residual     = Z_T_real - Z_C_pred.detach()   # (B, D)
-    z_t_expanded = f_exp(z_t)                     # (B, D)
+    residual     = Z_T_real - Z_C_pred.detach()
+    z_t_expanded = f_exp(z_t)
     recon_loss   = F.mse_loss(z_t_expanded, residual)
-    kl_loss      = kl_with_free_bits(mu, logvar, free_bits=0.5)
-
+    
+    # Standard KL — no free bits
+    kl_loss = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=-1).mean()
+    
     return recon_loss + beta * kl_loss, recon_loss, kl_loss
 
 # ── Extract representations ───────────────────────────────────────────────────
@@ -287,9 +281,9 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=30, eta_min=1e-4
 )
 
-def get_beta(epoch, warmup=5, beta_max=4.0):
-    """Beta annealing: start at 0.5, reach beta_max after warmup epochs."""
-    return min(beta_max, 0.5 + (beta_max - 0.5) * epoch / warmup)
+def get_beta(epoch, warmup=15, beta_max=0.5):
+    # Start at 0, reach 0.5 over 15 epochs
+    return min(beta_max, beta_max * epoch / warmup)
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
