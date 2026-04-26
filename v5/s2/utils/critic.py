@@ -213,18 +213,6 @@ class DoubleQCritic(nn.Module):
 
 
 
-
-
-
-
-
-# ----------------------------------------------------------------
-
-
-
-
-
-
 # from https://github.com/denisyarats/pytorch_sac/blob/master/agent/actor.py
 
 
