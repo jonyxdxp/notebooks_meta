@@ -393,7 +393,12 @@ def train_epoch(loader, epoch: int) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def save_checkpoint(epoch, metrics, suffix=None):
-    filename = f'{suffix}.pt' if suffix else f'epoch_{epoch:03d}.pt'
+    if suffix:
+        filename = f'{suffix}.pt'
+    elif isinstance(epoch, int):
+        filename = f'epoch_{epoch:03d}.pt'
+    else:
+        filename = f'epoch_{epoch}.pt'
     path = os.path.join(CFG.ckpt_dir, filename)
     torch.save({
         'epoch':           epoch if isinstance(epoch, int) else -1,
@@ -447,8 +452,8 @@ best_val_loss = float('inf')
 for epoch in range(start_epoch, CFG.n_epochs + 1):
     train_metrics = train_epoch(train_loader, epoch)
     val_metrics   = eval_epoch(val_loader)
-    scheduler.step()
-    lr = get_lr()   # propagates new LR into moml.meta_lr / moml.inner_lr
+    lr = get_lr()   # read LR before stepping so epoch 1 logs the correct value
+    scheduler.step()  # step AFTER using the LR (avoids PyTorch warning)
 
     history['train_loss'].append(train_metrics.get('loss', 0.0))
     history['train_bcs'].append(train_metrics.get('bcs_loss', 0.0))
