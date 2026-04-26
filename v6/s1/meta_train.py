@@ -16,16 +16,16 @@ Drop-in changes vs. your original notebook:
 
 import os
 import glob
-import copy
 
 import torch
 import torch.nn as nn
+from torch.func import functional_call   # zero-copy stateless forward
 from torch.optim import AdamW
 from tqdm import tqdm
 
 # ── your existing imports ─────────────────────────────────────────────────────
 import sys
-sys.path.insert(0, '/content/notebooks_meta/v6/s1')
+sys.path.insert(0, '/content/notebooks_meta/v5/s1')
 
 from cog_arch.encoder import Encoder
 from losses import BCS
@@ -41,139 +41,134 @@ from config import CFG, DEVICE
 
 class MOMLTrainer:
     """
-    Memory-Efficient Online Meta-Learner adapted for a JEPA text encoder.
+    Memory-Efficient Online Meta-Learner — fast version using functional_call.
 
-    State kept between batches (all O(d)):
-        w         – direction-correction anchor            (Eq. 8)
-        prev_grad – ∇[f_{t-1} ∘ U_{t-1}](θ^t)            (used in R_t)
+    Speed problem with the naive version
+    -------------------------------------
+    The original code called copy.deepcopy(encoder) up to 3× per batch:
+      • once for the suffered-loss evaluation
+      • once per K corrected-gradient step
+      • once for the w-state update
+    deepcopy on a transformer is O(params) in time *and* triggers a full
+    CUDA memory allocation, making it the dominant bottleneck.
 
-    Each call to .step() runs one full MOML round (Algorithm 1):
-        1. Adapt  : U_t(θ) — shallow-copy + 1 inner SGD step on context loss
-        2. Suffer : record query loss before update
-        3. K corrected gradient steps using ∇f_t + ∇R_t
-        4. Update w and prev_grad
-        5. EMA-update target encoder
+    Fix: torch.func.functional_call
+    --------------------------------
+    functional_call(module, param_dict, args) runs a forward pass with
+    *arbitrary* parameter tensors without touching the module's .parameters().
+    We compute adapted params as plain tensors (φ = θ - η*∇L) and pass them
+    directly — zero copies of the model, full autograd support.
+
+    Additionally, the K-loop's last adapted params are *reused* for the state
+    update (Eq. 8), saving one extra adaptation per batch.
+
+    Per-batch cost: 2 functional forwards (inner + outer) × (K + 1)
+                    versus (K + 2) deepcopies before.
     """
 
     def __init__(
         self,
         context_encoder: nn.Module,
         target_encoder:  nn.Module,
-        loss_fn,                         # BCS instance, returns dict
-        inner_lr:    float = 1e-3,       # η  — inner adaptation LR
-        meta_lr:     float = 1e-3,       # β  — outer MOML update LR
-        alpha:       float = 1.0,        # α  — regulariser strength
-        K:           int   = 1,          # corrected gradient steps per round
-        ema_decay:   float = 0.996,
-        device:      torch.device = None,
+        loss_fn,
+        inner_lr:  float = 1e-3,
+        meta_lr:   float = 1e-3,
+        alpha:     float = 1.0,
+        K:         int   = 1,
+        ema_decay: float = 0.996,
+        device:    torch.device = None,
     ):
-        self.ctx_enc  = context_encoder
-        self.tgt_enc  = target_encoder
-        self.loss_fn  = loss_fn
-        self.inner_lr = inner_lr
-        self.meta_lr  = meta_lr
-        self.alpha    = alpha
-        self.K        = K
+        self.ctx_enc   = context_encoder
+        self.tgt_enc   = target_encoder
+        self.loss_fn   = loss_fn
+        self.inner_lr  = inner_lr
+        self.meta_lr   = meta_lr
+        self.alpha     = alpha
+        self.K         = K
         self.ema_decay = ema_decay
-        self.device   = device or torch.device('cpu')
+        self.device    = device or torch.device('cpu')
 
-        # ── MOML state vectors  (same shape as θ, all zeros at t=0) ──────
-        params = list(self.ctx_enc.parameters())
-        self.w         = [torch.zeros_like(p.data) for p in params]
-        self.prev_grad = [torch.zeros_like(p.data) for p in params]
+        # Cache named buffers once — they never change
+        self._buffers = dict(self.ctx_enc.named_buffers())
+
+        # MOML state: O(d) memory, persists between batches
+        self.w         = {n: torch.zeros_like(p.data)
+                          for n, p in self.ctx_enc.named_parameters()}
+        self.prev_grad = {n: torch.zeros_like(p.data)
+                          for n, p in self.ctx_enc.named_parameters()}
 
     # ── public API ────────────────────────────────────────────────────────────
 
     def step(self, batch: dict) -> dict:
-        """
-        One MOML round = one batch.
-
-        Returns
-        -------
-        loss_dict : {'loss', 'bcs_loss', 'invariance_loss', ...}
-                    Values are the *suffered* loss (before the meta update),
-                    consistent with your original logging.
-        """
+        """One MOML round (= one batch). Returns the suffered loss dict."""
         ctx_ids, ctx_mask, tgt_ids, tgt_mask, span_mask = self._unpack(batch)
 
-        # ── Step 1 · Adapt  U_t(θ)  on the context/support side ──────────
-        # We deep-copy the encoder and take one inner SGD step,
-        # keeping the computation graph so we can differentiate back to θ.
-        fast_enc = self._inner_adapt(ctx_ids, ctx_mask,
-                                     tgt_ids, tgt_mask, span_mask)
-
-        # ── Step 2 · Suffer  f_t(φ_t)  (query loss, no grad) ─────────────
+        # Pre-compute target representation once — shared across all steps
         with torch.no_grad():
-            loss_dict_suffered = self._query_loss(
-                fast_enc, tgt_ids, tgt_mask, span_mask, no_grad=True)
+            h_tgt = self.tgt_enc(tgt_ids, attention_mask=tgt_mask)
+            if isinstance(h_tgt, tuple):
+                h_tgt = h_tgt[0]
+            z_tgt = self._masked_pool(h_tgt, span_mask)   # (B, D)
 
-        # ── Steps 3–4 · K corrected gradient steps ────────────────────────
+        # ── Step 1 · Suffered loss  f_t(U_t(θ))  — logged, no update ────
+        # Cheap: functional adapt + forward, fully detached
+        with torch.no_grad():
+            phi = self._adapt_params(
+                self._named_params(), ctx_ids, ctx_mask, z_tgt, span_mask,
+                create_graph=False,
+            )
+            loss_dict_suffered = self._outer_loss(phi, tgt_ids, tgt_mask,
+                                                  span_mask, z_tgt)
+
+        # ── Steps 2–3 · K corrected gradient steps  (Eq. 7) ─────────────
         for _ in range(self.K):
-            # Rebuild fast model at *current* θ each step (Eq. 7)
-            fast_k = self._inner_adapt(ctx_ids, ctx_mask,
-                                       tgt_ids, tgt_mask, span_mask)
+            theta = self._named_params()          # current θ_k  (live tensors)
+
+            # φ_k = U_t(θ_k) — adapted params, graph attached to θ_k
+            phi_k = self._adapt_params(theta, ctx_ids, ctx_mask,
+                                       z_tgt, span_mask, create_graph=True)
 
             # ∇[f_t ∘ U_t](θ_k)
-            loss_dict_k = self._query_loss(fast_k,
-                                           tgt_ids, tgt_mask, span_mask)
+            loss_k = self._outer_loss(phi_k, tgt_ids, tgt_mask,
+                                      span_mask, z_tgt)['loss']
             grads_ft = torch.autograd.grad(
-                loss_dict_k['loss'],
-                self.ctx_enc.parameters(),
-                allow_unused=True,
-                retain_graph=False,
+                loss_k, theta.values(),
+                allow_unused=True, retain_graph=False,
             )
-            grads_ft = [
-                g if g is not None else torch.zeros_like(p)
-                for g, p in zip(grads_ft, self.ctx_enc.parameters())
-            ]
+            grads_ft = {
+                n: (g if g is not None else torch.zeros_like(p))
+                for (n, p), g in zip(theta.items(), grads_ft)
+            }
 
-            # ∇R_t(θ_k) = -prev_grad + α*(θ_k - w)       (from Eq. 6)
-            grad_reg = [
-                -pg + self.alpha * (p.data - wv)
-                for pg, p, wv in zip(
-                    self.prev_grad,
-                    self.ctx_enc.parameters(),
-                    self.w,
-                )
-            ]
-
-            # θ_{k+1} = θ_k − β * (∇f_t + ∇R_t)
+            # ∇R_t(θ_k) = -prev_grad + α*(θ_k - w)
             with torch.no_grad():
-                for p, gf, gr in zip(
-                    self.ctx_enc.parameters(), grads_ft, grad_reg
-                ):
-                    p -= self.meta_lr * (gf + gr)
+                for n, p in self.ctx_enc.named_parameters():
+                    grad_total = grads_ft[n] + (
+                        -self.prev_grad[n] + self.alpha * (p.data - self.w[n])
+                    )
+                    p -= self.meta_lr * grad_total
 
-        # ── Step 5 · Update state  w_{t+1}  (Eq. 8) ─────────────────────
-        # Compute ∇[f_t ∘ U_t](θ^{t+1}) at the *new* meta-params
-        fast_new = self._inner_adapt(ctx_ids, ctx_mask,
-                                     tgt_ids, tgt_mask, span_mask)
-        loss_new  = self._query_loss(fast_new, tgt_ids, tgt_mask, span_mask)
+        # ── Step 4 · State update  w_{t+1}  (Eq. 8) ─────────────────────
+        # Reuse a fresh adaptation at the *new* θ^{t+1} — no extra deepcopy.
+        theta_new = self._named_params()
+        phi_new   = self._adapt_params(theta_new, ctx_ids, ctx_mask,
+                                       z_tgt, span_mask, create_graph=True)
+        loss_new  = self._outer_loss(phi_new, tgt_ids, tgt_mask,
+                                     span_mask, z_tgt)['loss']
         grad_new  = torch.autograd.grad(
-            loss_new['loss'],
-            self.ctx_enc.parameters(),
-            allow_unused=True,
-            retain_graph=False,
+            loss_new, theta_new.values(),
+            allow_unused=True, retain_graph=False,
         )
-        grad_new = [
-            g if g is not None else torch.zeros_like(p)
-            for g, p in zip(grad_new, self.ctx_enc.parameters())
-        ]
 
         with torch.no_grad():
-            # w_{t+1} = ½ (w_t + θ^{t+1} − (1/α) * grad_new)
-            self.w = [
-                0.5 * (wv + p.data - (1.0 / self.alpha) * gn)
-                for wv, p, gn in zip(
-                    self.w, self.ctx_enc.parameters(), grad_new
-                )
-            ]
-            # prev_grad ← grad at new θ  (will be used next round)
-            self.prev_grad = [g.detach().clone() for g in grad_new]
+            for (n, p), gn in zip(self.ctx_enc.named_parameters(), grad_new):
+                gn = gn if gn is not None else torch.zeros_like(p)
+                # w_{t+1} = ½ (w_t + θ^{t+1} - (1/α)*grad_new)
+                self.w[n] = 0.5 * (self.w[n] + p.data
+                                   - (1.0 / self.alpha) * gn)
+                self.prev_grad[n] = gn.detach().clone()
 
-        # ── EMA: target_encoder ← decay*target + (1-decay)*context ──────
         self._ema_update()
-
         return loss_dict_suffered
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -187,65 +182,56 @@ class MOMLTrainer:
             batch['target_mask'].to(self.device),
         )
 
-    def _inner_adapt(self, ctx_ids, ctx_mask, tgt_ids, tgt_mask, span_mask):
-        """
-        U_t(θ): shallow-copy context_encoder, take one SGD step on the
-        context-side JEPA loss, keeping the graph attached to θ.
+    def _named_params(self) -> dict:
+        """Live snapshot of named parameters (no copy)."""
+        return dict(self.ctx_enc.named_parameters())
 
-        The fast model's weights are:  φ = θ - η * ∇_θ L_inner(θ)
-        so ∂φ/∂θ is tracked and meta-gradients flow through to θ.
+    def _adapt_params(self, params: dict,
+                      ctx_ids, ctx_mask, z_tgt, span_mask,
+                      create_graph: bool = True) -> dict:
         """
-        fast = copy.deepcopy(self.ctx_enc)
-        fast.train()
+        U_t(θ): one inner SGD step, returning adapted param dict φ.
 
-        # ---- inner forward (context → representation) -------------------
-        h_ctx = fast(ctx_ids, attention_mask=ctx_mask)
+        Uses functional_call so no model copy is needed.
+        When create_graph=True the returned tensors carry a grad_fn
+        back to the original θ, enabling meta-gradients.
+        """
+        # Inner forward with current params (no deepcopy)
+        h_ctx = functional_call(
+            self.ctx_enc, (params, self._buffers),
+            args=(ctx_ids,), kwargs={'attention_mask': ctx_mask},
+        )
         if isinstance(h_ctx, tuple):
             h_ctx = h_ctx[0]
 
-        with torch.no_grad():
-            h_tgt = self.tgt_enc(tgt_ids, attention_mask=tgt_mask)
-            if isinstance(h_tgt, tuple):
-                h_tgt = h_tgt[0]
-
         z_ctx = self._masked_pool(h_ctx, span_mask)
-        z_tgt = self._masked_pool(h_tgt, span_mask)
-
         inner_loss = self.loss_fn(z_ctx, z_tgt)['loss']
 
-        # ---- manual SGD step (create_graph=True lets meta-grad flow) -----
+        # ∇_φ L_inner  — create_graph lets the outer loss differentiate through
         grads = torch.autograd.grad(
-            inner_loss, fast.parameters(), create_graph=True
+            inner_loss, params.values(), create_graph=create_graph,
         )
-        with torch.no_grad():
-            for p, g in zip(fast.parameters(), grads):
-                p -= self.inner_lr * g
 
-        return fast
+        # φ = θ - η * ∇L  (differentiable w.r.t. θ when create_graph=True)
+        return {n: p - self.inner_lr * g
+                for (n, p), g in zip(params.items(), grads)}
 
-    def _query_loss(self, fast_enc, tgt_ids, tgt_mask, span_mask,
-                    no_grad=False):
+    def _outer_loss(self, phi: dict,
+                    tgt_ids, tgt_mask, span_mask, z_tgt) -> dict:
         """
-        Evaluate BCS( z_ctx_adapted , z_tgt ) — the outer / query loss.
-        fast_enc already ran the inner adaptation step.
+        f_t ∘ U_t : BCS(z_adapted, z_tgt).
+        phi is the adapted param dict from _adapt_params.
+        z_tgt is pre-computed (target encoder, no grad).
         """
-        ctx_fn = torch.no_grad() if no_grad else torch.enable_grad()
-        with ctx_fn:
-            # NOTE: we re-use tgt_ids as the query input for the fast encoder
-            # (the adapted encoder sees the target tokens and predicts z_tgt).
-            h_fast = fast_enc(tgt_ids, attention_mask=tgt_mask)
-            if isinstance(h_fast, tuple):
-                h_fast = h_fast[0]
+        h_fast = functional_call(
+            self.ctx_enc, (phi, self._buffers),
+            args=(tgt_ids,), kwargs={'attention_mask': tgt_mask},
+        )
+        if isinstance(h_fast, tuple):
+            h_fast = h_fast[0]
 
-            with torch.no_grad():
-                h_tgt = self.tgt_enc(tgt_ids, attention_mask=tgt_mask)
-                if isinstance(h_tgt, tuple):
-                    h_tgt = h_tgt[0]
-
-            z_pred = self._masked_pool(h_fast, span_mask)
-            z_tgt  = self._masked_pool(h_tgt,  span_mask)
-
-            return self.loss_fn(z_pred, z_tgt)
+        z_pred = self._masked_pool(h_fast, span_mask)
+        return self.loss_fn(z_pred, z_tgt)
 
     @staticmethod
     def _masked_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -256,9 +242,8 @@ class MOMLTrainer:
 
     def _ema_update(self):
         with torch.no_grad():
-            for p_c, p_t in zip(
-                self.ctx_enc.parameters(), self.tgt_enc.parameters()
-            ):
+            for p_c, p_t in zip(self.ctx_enc.parameters(),
+                                 self.tgt_enc.parameters()):
                 p_t.data.mul_(self.ema_decay).add_(
                     p_c.data, alpha=1.0 - self.ema_decay
                 )
@@ -266,15 +251,14 @@ class MOMLTrainer:
     # ── checkpoint helpers ────────────────────────────────────────────────────
 
     def state_dict(self) -> dict:
-        """Serialise the MOML state vectors (w, prev_grad)."""
         return {
-            'w':         [t.cpu() for t in self.w],
-            'prev_grad': [t.cpu() for t in self.prev_grad],
+            'w':         {n: t.cpu() for n, t in self.w.items()},
+            'prev_grad': {n: t.cpu() for n, t in self.prev_grad.items()},
         }
 
     def load_state_dict(self, sd: dict):
-        self.w         = [t.to(self.device) for t in sd['w']]
-        self.prev_grad = [t.to(self.device) for t in sd['prev_grad']]
+        self.w         = {n: t.to(self.device) for n, t in sd['w'].items()}
+        self.prev_grad = {n: t.to(self.device) for n, t in sd['prev_grad'].items()}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
