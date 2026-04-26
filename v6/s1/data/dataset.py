@@ -1,5 +1,6 @@
 
 # ── Cell 3: Imports ───────────────────────────────────────────────────────────
+import os  # <-- Agregar esta línea
 
 import copy
 import sys
