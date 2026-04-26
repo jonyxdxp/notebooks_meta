@@ -1,0 +1,80 @@
+# from https://github.com/facebookresearch/eb_jepa/blob/main/examples/ac_video_jepa/cfgs/planning_mppi.yaml
+
+
+
+
+
+
+# Configuración JEPA Stage 2 (Predictor Training)
+# Compatible con: código Transformer + VICReg/VC Loss
+
+meta:
+  seed: 2025
+  device: auto          # auto, cuda, or cpu
+
+
+data:
+  cache_dir: '/content/drive/MyDrive/data/cache'
+  raw_data_dir: '/content/data/dailydialog_processed'
+  batch_size: 64
+  eval_batch: 128
+  num_workers: 0
+  max_seq_len: 128
+  num_target_spans: 4
+  target_span_length: 8
+  # AÑADIR ESTOS:
+  eval_batch: 64        # Tamaño batch validación (o 128)
+  num_target_spans: 4   # Para JEPAMaskCollator
+  target_span_length: 8 # Para JEPAMaskCollator
+
+model:
+  vocab_size: 30522
+  hidden_size: 256
+  num_heads: 4        # S1 usó 4, no 8
+  num_layers: 4       # S1 usó 4, no 6
+  max_seq_len: 128
+  pred_hidden_size: 256
+  pred_num_heads:   4
+  pred_num_layers:  2
+  dstc:             256
+
+    
+  
+  
+  
+
+loss:
+  # Variance-Covariance regularization (VICReg)
+  std_coeff: 1.0
+  cov_coeff: 1.0
+
+optim:
+  epochs: 20
+  lr: 0.0001
+  weight_decay: 0.05
+
+training:
+  use_amp: true         # Mixed precision
+  dtype: float16
+  s1_ckpt: "/content/drive/MyDrive/metanet/v5/s1/checkpoints/epoch_best.pt"  # Ruta real
+  ema_decay: 0.996      # AÑADIDO: Decay para Exponential Moving Average (0.9-0.999)
+
+logging:
+  log_wandb: true
+  wandb_group: 
+  log_every: 1          # Validar/loggear cada N épocas
+  save_every: 10        # Guardar checkpoint cada N épocas
+  tqdm_silent: false
+  exp_dir: "/content/drive/MyDrive/metanet/v5/s2/checkpoints"  # AÑADIDO: Directorio para guardar checkpoints
+
+# --- Parámetros para búsqueda de hiperparámetros (sweep) ---
+sweep:
+  param_grid:
+    data.batch_size: [32, 64]
+    optim.lr: [0.001, 0.0001, 0.0005]
+    loss.std_coeff: [1, 10, 100, 200]
+    loss.cov_coeff: [1, 10, 100, 200]
+    meta.seed: [1, 1000, 10000]
+
+
+
