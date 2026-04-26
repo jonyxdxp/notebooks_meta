@@ -16,6 +16,7 @@ Drop-in changes vs. your original notebook:
 
 import os
 import glob
+import copy
 
 import torch
 import torch.nn as nn
