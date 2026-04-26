@@ -112,13 +112,17 @@ class MOMLTrainer:
             z_tgt = self._masked_pool(h_tgt, span_mask)   # (B, D)
 
         # ── Step 1 · Suffered loss  f_t(U_t(θ))  — logged, no update ────
-        # Cheap: functional adapt + forward, fully detached
-        with torch.no_grad():
-            phi = self._adapt_params(
+        # _adapt_params needs autograd to compute the inner gradient,
+        # so we enable_grad for that step, then immediately detach phi
+        # before evaluating the outer loss (which needs no grad for logging).
+        with torch.enable_grad():
+            phi_s = self._adapt_params(
                 self._named_params(), ctx_ids, ctx_mask, z_tgt, span_mask,
                 create_graph=False,
             )
-            loss_dict_suffered = self._outer_loss(phi, tgt_ids, tgt_mask,
+        phi_s = {n: p.detach() for n, p in phi_s.items()}
+        with torch.no_grad():
+            loss_dict_suffered = self._outer_loss(phi_s, tgt_ids, tgt_mask,
                                                   span_mask, z_tgt)
 
         # ── Steps 2–3 · K corrected gradient steps  (Eq. 7) ─────────────
