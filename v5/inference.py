@@ -65,8 +65,10 @@ class DynamicsHead(nn.Module):
 class LearnedGoalPrior(nn.Module):
     def __init__(self, z_dim=256):
         super().__init__()
-        self.log_sigma_goal = nn.Parameter(torch.zeros(1))
+        # ✅ scalar tensor [] to match checkpoint — was torch.zeros(1)
+        self.log_sigma_goal = nn.Parameter(torch.zeros([]))
         self.z_dim = z_dim
+        
 
     def get_sigma(self):
         return F.softplus(self.log_sigma_goal) + 1e-4
