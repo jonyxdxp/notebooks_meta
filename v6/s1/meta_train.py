@@ -431,7 +431,7 @@ print(f'  Text JEPA + MOML — {CFG.n_epochs} epochs   device={DEVICE}')
 print(f'{"="*60}\n')
 
 start_epoch = 1
-best_ckpt   = os.path.join(CFG.ckpt_dir, 'best.pt')
+best_ckpt = os.path.join(CFG.ckpt_dir, 'epoch_best.pt')
 if os.path.exists(best_ckpt):
     print('Resuming from best checkpoint …')
     start_epoch = load_checkpoint(best_ckpt) + 1
