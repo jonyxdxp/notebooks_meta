@@ -176,7 +176,8 @@ def encode_reference(text, batch_size):
         text, return_tensors='pt',
         max_length=128, truncation=True, padding='max_length'
     ).to(DEVICE)
-    h     = s1_encoder(**enc)
+    # ✅ pass input_ids positionally, attention_mask as kwarg
+    h     = s1_encoder(enc['input_ids'], attention_mask=enc['attention_mask'])
     if isinstance(h, tuple): h = h[0]
     z_ref = mean_pool(h, enc['attention_mask'])   # (1, D)
     return z_ref.expand(batch_size, -1)           # (B, D)
