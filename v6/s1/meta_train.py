@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 # ── your existing imports ─────────────────────────────────────────────────────
 import sys
-sys.path.insert(0, '/content/notebooks_meta/v6/s1')
+sys.path.insert(0, '/content/notebooks_meta/v5/s1')
 
 from cog_arch.encoder import Encoder
 from losses import BCS
@@ -122,7 +122,7 @@ class MOMLTrainer:
             )
         phi_s = {n: p.detach() for n, p in phi_s.items()}
         with torch.no_grad():
-            loss_dict_suffered = self._outer_loss(phi_s, tgt_ids, tgt_mask,
+            loss_dict_suffered = self._outer_loss(phi_s, ctx_ids, ctx_mask,
                                                   span_mask, z_tgt)
 
         # ── Steps 2–3 · K corrected gradient steps  (Eq. 7) ─────────────
@@ -134,7 +134,7 @@ class MOMLTrainer:
                                        z_tgt, span_mask, create_graph=True)
 
             # ∇[f_t ∘ U_t](θ_k)
-            loss_k = self._outer_loss(phi_k, tgt_ids, tgt_mask,
+            loss_k = self._outer_loss(phi_k, ctx_ids, ctx_mask,
                                       span_mask, z_tgt)['loss']
             grads_ft = torch.autograd.grad(
                 loss_k, theta.values(),
@@ -158,7 +158,7 @@ class MOMLTrainer:
         theta_new = self._named_params()
         phi_new   = self._adapt_params(theta_new, ctx_ids, ctx_mask,
                                        z_tgt, span_mask, create_graph=True)
-        loss_new  = self._outer_loss(phi_new, tgt_ids, tgt_mask,
+        loss_new  = self._outer_loss(phi_new, ctx_ids, ctx_mask,
                                      span_mask, z_tgt)['loss']
         grad_new  = torch.autograd.grad(
             loss_new, theta_new.values(),
@@ -222,15 +222,18 @@ class MOMLTrainer:
                 for (n, p), g in zip(params.items(), grads)}
 
     def _outer_loss(self, phi: dict,
-                    tgt_ids, tgt_mask, span_mask, z_tgt) -> dict:
+                    ctx_ids, ctx_mask, span_mask, z_tgt) -> dict:
         """
-        f_t ∘ U_t : BCS(z_adapted, z_tgt).
-        phi is the adapted param dict from _adapt_params.
-        z_tgt is pre-computed (target encoder, no grad).
+        f_t ∘ U_t : BCS(z_ctx_adapted, z_tgt).
+
+        The adapted encoder runs on CONTEXT tokens (ctx_ids) and must predict
+        the TARGET representation (z_tgt, from target_encoder on tgt_ids).
+        Running it on tgt_ids instead made z_pred ≈ z_tgt by construction
+        (same tokens, near-identical EMA encoders) → invariance_loss ≈ 0.
         """
         h_fast = functional_call(
             self.ctx_enc, (phi, self._buffers),
-            args=(tgt_ids,), kwargs={'attention_mask': tgt_mask},
+            args=(ctx_ids,), kwargs={'attention_mask': ctx_mask},
         )
         if isinstance(h_fast, tuple):
             h_fast = h_fast[0]
@@ -457,7 +460,7 @@ for epoch in range(start_epoch, CFG.n_epochs + 1):
         f'train_loss={train_metrics["loss"]:.4f}  '
         f'val_loss={val_metrics["loss"]:.4f}  '
         f'bcs={train_metrics.get("bcs_loss", 0):.4f}  '
-        f'inv={train_metrics.get("invariance_loss", 0):.4f}  '
+        f'inv={train_metrics.get("invariance_loss", 0):.2e}  '
         f'lr={lr:.2e}'
     )
 
