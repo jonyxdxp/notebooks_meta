@@ -3,7 +3,7 @@
 **Paper:** *EBT-Policy: Energy Unlocks Emergent Physical Reasoning Capabilities*
 (arXiv:2510.27545, Davies et al., 2025)
 
----
+---hhh
 
 ## What is EBT-Policy?
 
