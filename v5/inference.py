@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-Inference: Full pipeline proof
-Compares three conditioning modes:
-  1. Oracle    — Z_T_real (upper bound)
-  2. PoE       — dynamics + prior fusion (actual system)
-  3. Random    — N(0,I) sample (lower bound baseline)
+Inference: Full pipeline proof — BJEPA Goal Prior v2
+Conditioning modes:
+  1. Oracle    — PoE(dynamics, Z_T_real)      upper bound
+  2. Reference — PoE(dynamics, S1(ref_text))  user-provided reference
+  3. Dynamics  — μ_dyn only                   no prior
+  4. Random    — N(0,I)                        lower bound
 """
 
 import sys
-import os
-import copy
 import importlib.util
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
-ROOT     = '/content/notebooks_meta'
-S1       = f'{ROOT}/v5/s1'
-S2       = f'{ROOT}/v5/s2'
-S3       = f'{ROOT}/v5/s3'
-DEVICE   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+ROOT   = '/content/notebooks_meta'
+S2     = f'{ROOT}/v5/s2'
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 sys.path.insert(0, ROOT)
 
@@ -50,43 +48,47 @@ def mean_pool(hidden, mask):
     mask_f = mask.unsqueeze(-1).float()
     return (hidden * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
 
-# ── Prior components (from train_prior.py) ────────────────────────────────────
+# ── Prior components — must match train_prior_v2.py exactly ──────────────────
 
-class DynamicsHead(torch.nn.Module):
+class DynamicsHead(nn.Module):
     def __init__(self, hidden_dim=256):
         super().__init__()
-        self.mu_head     = torch.nn.Linear(hidden_dim, hidden_dim)
-        self.logvar_head = torch.nn.Linear(hidden_dim, hidden_dim)
+        self.mu_head     = nn.Linear(hidden_dim, hidden_dim)
+        self.logvar_head = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(self, z_pred):
         mu     = self.mu_head(z_pred)
         logvar = self.logvar_head(z_pred).clamp(-10, 2)
         return mu, logvar
 
-class StaticPrior(torch.nn.Module):
-    def __init__(self, latent_dim=256):
+
+class LearnedGoalPrior(nn.Module):
+    def __init__(self, z_dim=256):
         super().__init__()
-        self.prior_mu     = torch.nn.Parameter(torch.zeros(latent_dim))
-        self.prior_logvar = torch.nn.Parameter(torch.zeros(latent_dim))
+        self.log_sigma_goal = nn.Parameter(torch.zeros(1))
+        self.z_dim = z_dim
 
-    def get_prior(self, batch_size, device):
-        mu     = self.prior_mu.unsqueeze(0).expand(batch_size, -1)
-        logvar = self.prior_logvar.unsqueeze(0).expand(batch_size, -1)
-        return mu, logvar
+    def get_sigma(self):
+        return F.softplus(self.log_sigma_goal) + 1e-4
 
-    def product_of_experts(self, mu_dyn, logvar_dyn, batch_size, device):
-        mu_prior, logvar_prior = self.get_prior(batch_size, device)
+    def forward(self, z_eta):
+        sigma = self.get_sigma()
+        sig   = sigma.expand(z_eta.size(0), self.z_dim)
+        return z_eta, sig
+
+    def product_of_experts(self, mu_dyn, logvar_dyn, z_eta):
+        """
+        Hard PoE fusion:
+          dynamics: N(μ_dyn, exp(logvar_dyn))
+          prior:    N(z_eta, σ_goal²)
+        Returns posterior mean.
+        """
+        mu_prior, sig_prior = self.forward(z_eta)
         prec_dyn   = logvar_dyn.exp().reciprocal()
-        prec_prior = logvar_prior.exp().reciprocal()
+        prec_prior = sig_prior.pow(2).reciprocal()
         prec_post  = prec_dyn + prec_prior
         mu_post    = (prec_dyn * mu_dyn + prec_prior * mu_prior) / prec_post
         return mu_post
-
-    def sample_prior(self, batch_size, device):
-        """Sample from learned prior — NOT N(0,I)."""
-        mu, logvar = self.get_prior(batch_size, device)
-        std = (0.5 * logvar).exp()
-        return mu + std * torch.randn_like(std)
 
 # ── Load all models ───────────────────────────────────────────────────────────
 
@@ -115,9 +117,7 @@ s2_predictor = DM(
     input_dim   = CFG.model.dstc,
     hidden_dim  = CFG.model.pred_hidden_size,
     output_dim  = CFG.model.dstc,
-    dim_head    = 64,
-    dropout     = 0.0,
-    emb_dropout = 0.0,
+    dim_head    = 64, dropout=0.0, emb_dropout=0.0,
 ).to(DEVICE)
 s2_ckpt = torch.load(
     Path(CFG.logging.exp_dir) / 'best.pt',
@@ -128,21 +128,20 @@ s2_predictor.eval()
 for p in s2_predictor.parameters(): p.requires_grad = False
 print('S2 loaded.')
 
-# Prior (dynamics head + static prior)
+# Prior v2 — dynamics head + learned goal prior
 dynamics_head = DynamicsHead(hidden_dim=D).to(DEVICE)
-prior         = StaticPrior(latent_dim=D).to(DEVICE)
+goal_prior    = LearnedGoalPrior(z_dim=D).to(DEVICE)
 
 prior_ckpt = torch.load(
-    '/content/drive/MyDrive/metanet/v5/prior/best.pt',
+    '/content/drive/MyDrive/metanet/v5/prior_v2/best.pt',
     map_location=DEVICE, weights_only=False
 )
 dynamics_head.load_state_dict(prior_ckpt['dynamics_head'])
-prior.load_state_dict(prior_ckpt['prior'])
-dynamics_head.eval()
-prior.eval()
+goal_prior.load_state_dict(prior_ckpt['goal_prior'])
+dynamics_head.eval(); goal_prior.eval()
 for p in dynamics_head.parameters(): p.requires_grad = False
-for p in prior.parameters():         p.requires_grad = False
-print('Prior loaded.')
+for p in goal_prior.parameters():    p.requires_grad = False
+print(f'Prior v2 loaded (σ_goal={goal_prior.get_sigma().item():.4f})')
 
 # S3 decoder
 decoder = Decoder(
@@ -160,20 +159,38 @@ s3_ckpt = torch.load(
 decoder.load_state_dict(s3_ckpt['decoder'])
 decoder.eval()
 for p in decoder.parameters(): p.requires_grad = False
-print(f'S3 loaded (val_ppl={s3_ckpt["val_ppl"]:.1f}).')
+print(f'S3 loaded (val_ppl={s3_ckpt["val_ppl"]:.1f})')
 
 # ── Dataloader ────────────────────────────────────────────────────────────────
 
 _, val_loader = get_stage2_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
 
-# ── Inference function ────────────────────────────────────────────────────────
+# ── Encode a reference text ───────────────────────────────────────────────────
 
 @torch.no_grad()
-def run_inference(batch, n_samples=5, max_new_tokens=30,
-                  temperature=0.8, top_k=50):
+def encode_reference(text, batch_size):
+    """Encode a reference turn text with frozen S1 encoder."""
+    enc   = tokenizer(
+        text, return_tensors='pt',
+        max_length=128, truncation=True, padding='max_length'
+    ).to(DEVICE)
+    h     = s1_encoder(**enc)
+    if isinstance(h, tuple): h = h[0]
+    z_ref = mean_pool(h, enc['attention_mask'])   # (1, D)
+    return z_ref.expand(batch_size, -1)           # (B, D)
+
+# ── Inference ─────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def run_inference(batch, n_samples=3, max_new_tokens=30,
+                  temperature=0.8, top_k=50,
+                  reference_text=None):
     """
-    Run all three conditioning modes on the same batch.
-    Returns dict of generated text per mode.
+    Runs four conditioning modes on the same batch:
+      oracle    : PoE(dynamics, Z_T_real)
+      reference : PoE(dynamics, S1(reference_text))  if provided
+      dynamics  : μ_dyn only — no prior
+      random    : N(0,I)
     """
     ctx_ids  = batch['input_ids_a'][:n_samples].to(DEVICE)
     ctx_mask = batch['attention_mask_a'][:n_samples].to(DEVICE)
@@ -181,37 +198,41 @@ def run_inference(batch, n_samples=5, max_new_tokens=30,
     tgt_mask = batch['attention_mask_b'][:n_samples].to(DEVICE)
     B        = ctx_ids.size(0)
 
-    # ── Encode context and target ─────────────────────────────────────────────
+    # Encode
     ctx_h = s1_encoder(ctx_ids, attention_mask=ctx_mask)
     if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
-
     tgt_h = s1_encoder(tgt_ids, attention_mask=tgt_mask)
     if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
 
-    # ── S2 dynamics prediction ────────────────────────────────────────────────
+    # Representations
     z_pred   = s2_predictor(ctx_h, ctx_h)
     z_C_pred = mean_pool(z_pred, ctx_mask)    # (B, D)
+    Z_T_real = mean_pool(tgt_h,  tgt_mask)   # (B, D)
 
-    # ── Z_T_real — oracle conditioning ───────────────────────────────────────
-    Z_T_real = mean_pool(tgt_h, tgt_mask)     # (B, D)
-
-    # ── PoE conditioning ──────────────────────────────────────────────────────
+    # Dynamics distribution
     mu_dyn, logvar_dyn = dynamics_head(z_C_pred)
-    z_poe = prior.product_of_experts(mu_dyn, logvar_dyn, B, DEVICE)
 
-    # ── Random baseline ───────────────────────────────────────────────────────
-    z_random = torch.randn_like(Z_T_real)
+    # Conditioning vectors
+    z_oracle   = goal_prior.product_of_experts(mu_dyn, logvar_dyn, Z_T_real)
+    z_dynamics = mu_dyn
+    z_random   = torch.randn_like(Z_T_real)
 
-    # ── Prompt: [CLS] token ───────────────────────────────────────────────────
-    prompt = torch.full((B, 1), 101, dtype=torch.long, device=DEVICE)
+    modes = [
+        ('oracle',   z_oracle),
+        ('dynamics', z_dynamics),
+        ('random',   z_random),
+    ]
 
-    # ── Generate for each mode ────────────────────────────────────────────────
-    results = {}
-    for mode, z_cond in [
-        ('oracle', Z_T_real),
-        ('poe',    z_poe),
-        ('random', z_random),
-    ]:
+    if reference_text is not None:
+        z_ref = encode_reference(reference_text, B)
+        z_poe_ref = goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_ref)
+        modes.insert(1, ('reference', z_poe_ref))
+
+    # Generate
+    prompt  = torch.full((B, 1), 101, dtype=torch.long, device=DEVICE)
+    results = {'context': ctx_ids, 'target': tgt_ids}
+
+    for mode, z_cond in modes:
         generated = decoder.generate(
             prompt_ids     = prompt,
             z_fused        = z_cond,
@@ -221,51 +242,46 @@ def run_inference(batch, n_samples=5, max_new_tokens=30,
         )
         results[mode] = generated
 
-    # ── Decode context turns too ──────────────────────────────────────────────
-    results['context'] = ctx_ids
-    results['target']  = tgt_ids
-
     return results
 
-# ── Decode tokens to text ─────────────────────────────────────────────────────
+# ── Decode ────────────────────────────────────────────────────────────────────
 
 def decode(token_ids):
     return tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
 
-# ── Run on a few val batches ──────────────────────────────────────────────────
+# ── Qualitative eval ──────────────────────────────────────────────────────────
+
+REFERENCE_TEXT = "i understand what you mean, that makes sense."
+N_BATCHES      = 3
+N_SAMPLES      = 3
 
 print(f'\n{"="*70}')
-print('  Full Pipeline Inference — Oracle vs PoE vs Random')
+print(f'  Full Pipeline Inference — Goal Prior v2')
+print(f'  Reference: "{REFERENCE_TEXT}"')
 print(f'{"="*70}\n')
 
-N_BATCHES = 3
-N_SAMPLES = 3
-
 for batch_idx, batch in enumerate(val_loader):
-    if batch_idx >= N_BATCHES:
-        break
+    if batch_idx >= N_BATCHES: break
 
-    results = run_inference(batch, n_samples=N_SAMPLES)
+    results = run_inference(
+        batch,
+        n_samples      = N_SAMPLES,
+        reference_text = REFERENCE_TEXT,
+    )
 
-    print(f'─── Batch {batch_idx + 1} ───────────────────────────────────────────────')
+    print(f'─── Batch {batch_idx+1} ──────────────────────────────────────────')
 
     for i in range(N_SAMPLES):
-        ctx_text    = decode(results['context'][i])
-        tgt_text    = decode(results['target'][i])
-        oracle_text = decode(results['oracle'][i])
-        poe_text    = decode(results['poe'][i])
-        random_text = decode(results['random'][i])
-
         print(f'\n  Sample {i+1}:')
-        print(f'  Context  : {ctx_text[:80]}')
-        print(f'  Target   : {tgt_text[:80]}')
-        print(f'  Oracle   : {oracle_text[:80]}')
-        print(f'  PoE      : {poe_text[:80]}')
-        print(f'  Random   : {random_text[:80]}')
-
+        print(f'  Context   : {decode(results["context"][i])[:80]}')
+        print(f'  Target    : {decode(results["target"][i])[:80]}')
+        print(f'  Oracle    : {decode(results["oracle"][i])[:80]}')
+        print(f'  Reference : {decode(results["reference"][i])[:80]}')
+        print(f'  Dynamics  : {decode(results["dynamics"][i])[:80]}')
+        print(f'  Random    : {decode(results["random"][i])[:80]}')
     print()
 
-# ── Quantitative eval: cosine similarity to target ───────────────────────────
+# ── Quantitative eval ─────────────────────────────────────────────────────────
 
 print(f'\n{"="*70}')
 print('  Quantitative: cosine similarity to Z_T_real')
@@ -273,16 +289,10 @@ print(f'{"="*70}\n')
 
 @torch.no_grad()
 def eval_similarity(loader, n_batches=10):
-    """
-    For each mode, measure cosine similarity between
-    the conditioning vector and Z_T_real.
-    This tells us how well each mode approximates the oracle.
-    """
-    sims = {'oracle': [], 'poe': [], 'random': []}
+    sims = {'oracle': [], 'dynamics': [], 'random': []}
 
     for batch_idx, batch in enumerate(loader):
-        if batch_idx >= n_batches:
-            break
+        if batch_idx >= n_batches: break
 
         ctx_ids  = batch['input_ids_a'].to(DEVICE)
         ctx_mask = batch['attention_mask_a'].to(DEVICE)
@@ -300,12 +310,17 @@ def eval_similarity(loader, n_batches=10):
         Z_T_real = mean_pool(tgt_h,  tgt_mask)
 
         mu_dyn, logvar_dyn = dynamics_head(z_C_pred)
-        z_poe    = prior.product_of_experts(mu_dyn, logvar_dyn, B, DEVICE)
-        z_random = torch.randn_like(Z_T_real)
+
+        z_oracle   = goal_prior.product_of_experts(mu_dyn, logvar_dyn, Z_T_real)
+        z_dynamics = mu_dyn
+        z_random   = torch.randn_like(Z_T_real)
 
         Z_norm = F.normalize(Z_T_real, dim=-1)
-
-        for mode, z in [('oracle', Z_T_real), ('poe', z_poe), ('random', z_random)]:
+        for mode, z in [
+            ('oracle',   z_oracle),
+            ('dynamics', z_dynamics),
+            ('random',   z_random),
+        ]:
             sim = F.cosine_similarity(F.normalize(z, dim=-1), Z_norm).mean().item()
             sims[mode].append(sim)
 
@@ -314,13 +329,14 @@ def eval_similarity(loader, n_batches=10):
 sims = eval_similarity(val_loader)
 
 print(f'  Avg cosine similarity to Z_T_real:\n')
-print(f'  Oracle  : {sims["oracle"]:.4f}  (should be 1.0 — self-similarity)')
-print(f'  PoE     : {sims["poe"]:.4f}  (higher = better conditioning)')
-print(f'  Random  : {sims["random"]:.4f}  (baseline — near 0)')
+print(f'  Oracle   : {sims["oracle"]:.4f}   upper bound')
+print(f'  Dynamics : {sims["dynamics"]:.4f}   S2 only, no prior')
+print(f'  Random   : {sims["random"]:.4f}   lower bound')
 
-gap_poe    = sims['poe']    - sims['random']
-gap_oracle = sims['oracle'] - sims['random']
-print(f'\n  PoE improvement over random : {gap_poe:.4f}')
-print(f'  Oracle improvement (ceiling): {gap_oracle:.4f}')
-print(f'  PoE recovery of oracle gap  : {gap_poe/gap_oracle*100:.1f}%')
+gap_oracle   = sims['oracle']   - sims['random']
+gap_dynamics = sims['dynamics'] - sims['random']
+
+print(f'\n  Dynamics recovery : {gap_dynamics/gap_oracle*100:.1f}%  of oracle gap')
+print(f'  Oracle recovery   : {gap_oracle/gap_oracle*100:.1f}%  (ceiling)')
+print(f'  σ_goal            : {goal_prior.get_sigma().item():.4f}')
 print(f'\n{"="*70}')

@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 # ── your existing imports ─────────────────────────────────────────────────────
 import sys
-sys.path.insert(0, '/content/notebooks_meta/v5/s1')
+sys.path.insert(0, '/content/notebooks_meta/v6/s1')
 
 from cog_arch.encoder import Encoder
 from losses import BCS
