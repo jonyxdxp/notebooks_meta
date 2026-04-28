@@ -393,7 +393,7 @@ def save_checkpoint(epoch, metrics, suffix=None):
         filename = f'epoch_{epoch}.pt'
     path = os.path.join(CFG.ckpt_dir, filename)
     torch.save({
-        'epoch':           epoch if isinstance(epoch, int) else -1,
+        'epoch': epoch if isinstance(epoch, int) else CFG.n_epochs,
         'context_encoder': context_encoder.state_dict(),
         'target_encoder':  target_encoder.state_dict(),
         'scheduler':       scheduler.state_dict(),
@@ -466,7 +466,7 @@ for epoch in range(start_epoch, CFG.n_epochs + 1):
 
     if val_metrics['loss'] < best_val_loss:
         best_val_loss = val_metrics['loss']
-        save_checkpoint('best', val_metrics)
+        save_checkpoint(epoch, val_metrics, suffix='epoch_best')
         print(f'  ★ new best val_loss={best_val_loss:.4f}')
 
 print('\nTraining complete.')
