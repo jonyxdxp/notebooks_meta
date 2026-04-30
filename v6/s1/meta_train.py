@@ -36,6 +36,15 @@ import config
 from config import CFG, DEVICE
 
 
+
+
+
+
+
+
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MOML core  (self-contained, no external dependency)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,6 +278,16 @@ class MOMLTrainer:
         self.prev_grad = {n: t.to(self.device) for n, t in sd['prev_grad'].items()}
 
 
+
+
+
+
+
+
+
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Build models  (unchanged from your Cell 10)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,6 +307,11 @@ for p in target_encoder.parameters():
     p.requires_grad = False
 
 loss_fn = BCS(lmbd=10.0)
+
+
+
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,6 +349,13 @@ def get_lr() -> float:
     return lr
 
 
+
+
+
+
+
+
+
 # ── eval (unchanged logic) ────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -355,6 +386,13 @@ def eval_epoch(loader):
     return {k: v / n for k, v in totals.items()}
 
 
+
+
+
+
+
+
+
 # ── train epoch — only this function changes vs your original ─────────────────
 
 def train_epoch(loader, epoch: int) -> dict:
@@ -378,6 +416,12 @@ def train_epoch(loader, epoch: int) -> dict:
         pbar.set_postfix({k: f'{v.item():.4f}' for k, v in loss_dict.items()})
 
     return {k: v / n for k, v in totals.items()}
+
+
+
+
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,6 +458,12 @@ def load_checkpoint(path):
         moml.load_state_dict(ckpt['moml_state'])   # ← NEW
     print(f'  ✓ resumed from epoch {ckpt["epoch"]}')
     return ckpt['epoch']
+
+
+
+
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

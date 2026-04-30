@@ -648,6 +648,11 @@ class EBT_IMG_Denoise(L.LightningModule):
             raise NotImplementedError("need to implement bidirectional replay buffer")
             # self.replay_buffer = CausalReplayBuffer(max_size=replay_buffer_max_size, sample_size=self.replay_buffer_samples)
 
+
+
+
+
+
     def forward(self, noised_x, learning = True, no_randomness = True): # y here is caption_embeddings since is just text conditional; a lot of the logic here is just for S2 params, see pseudocode in paper for a more concise view of how this works. it can be < 10 LOC
         predicted_x_list = []
         predicted_energies_list = []
@@ -727,6 +732,12 @@ class EBT_IMG_Denoise(L.LightningModule):
 
         return predicted_x_list, predicted_energies_list
         
+
+
+
+
+
+
     
     def forward_loss_wrapper(self, x, phase="train"):
         no_randomness = False if phase == "train" else True
@@ -798,6 +809,13 @@ class EBT_IMG_Denoise(L.LightningModule):
                 log_dict['mse_raw_loss'] = torch.mean(mean_flat((real_images - denoised_images) ** 2)).detach()
         
         return log_dict
+
+
+
+
+
+
+
 
     
     def ebt_advanced_inference(self, noised_x, learning = True, no_randomness = True): #NOTE should eventually add more features from NLP and VID, for now is same as forward but with more steps
