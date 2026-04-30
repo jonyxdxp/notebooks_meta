@@ -96,7 +96,7 @@ Early stop:               halt when ||∇_a E||₂ < tol
 ---
 
 ## Quick start
-
+ddd
 ```bash
 pip install torch numpy
 
