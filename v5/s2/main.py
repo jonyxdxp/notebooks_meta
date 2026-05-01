@@ -194,8 +194,10 @@ best_val_loss = float('inf')
 Path(CFG.logging.exp_dir).mkdir(parents=True, exist_ok=True)
 
 # Resume desde best si existe
+# Resume desde best si existe
 best_ckpt = Path(CFG.logging.exp_dir) / 'best.pt'
 start_epoch = 1
+print('Training from scratch (epoch 1).')
 if best_ckpt.exists():
     ckpt = torch.load(best_ckpt, map_location=DEVICE, weights_only=False)
     predictor.load_state_dict(ckpt['predictor'])
