@@ -184,20 +184,17 @@ def validation_loop():
 
 # ========================== Training Loop ==========================
 
-# In validation_loop and history tracking:
+# CHANGE: Remove 'train_vc' and 'val_vc' from history
 history = {'train_loss': [], 'train_pred': [],
            'val_loss':   [], 'val_pred':   []}
-
-
 
 best_val_loss = float('inf')
 Path(CFG.logging.exp_dir).mkdir(parents=True, exist_ok=True)
 
-# Resume desde best si existe
-# Resume desde best si existe
 best_ckpt = Path(CFG.logging.exp_dir) / 'best.pt'
 start_epoch = 1
 print('Training from scratch (epoch 1).')
+
 if best_ckpt.exists():
     ckpt = torch.load(best_ckpt, map_location=DEVICE, weights_only=False)
     predictor.load_state_dict(ckpt['predictor'])
@@ -213,6 +210,8 @@ else:
 print(f'\n{"="*60}')
 print(f'  Text JEPA S2 — {CFG.optim.epochs} epochs   device={DEVICE}')
 print(f'{"="*60}\n')
+
+
 
 for epoch in range(start_epoch, CFG.optim.epochs + 1):
     predictor.train(); projector.train()
@@ -233,19 +232,20 @@ for epoch in range(start_epoch, CFG.optim.epochs + 1):
     tr = {k: v/n for k, v in totals.items()}
     vl = validation_loop()
 
+    # CHANGE: Remove vc_loss lines
     history['train_loss'].append(tr['loss'].item() if torch.is_tensor(tr['loss']) else tr['loss'])
     history['train_pred'].append(tr['pred_loss'].item() if torch.is_tensor(tr['pred_loss']) else tr['pred_loss'])
-    history['train_vc'].append(tr['vc_loss'].item() if torch.is_tensor(tr['vc_loss']) else tr['vc_loss'])
+    # Remove: history['train_vc'].append(...)
+    
     history['val_loss'].append(vl['loss'])
     history['val_pred'].append(vl['pred_loss'])
-    history['val_vc'].append(vl['vc_loss'])
+    # Remove: history['val_vc'].append(...)
 
- # Remove vc from the print statement:
     print(
-    f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
-    f'train={tr["loss"]:.4f}  '
-    f'val={vl["loss"]:.4f}  '
-    f'lr={optimizer.param_groups[0]["lr"]:.2e}'
+        f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
+        f'train={tr["loss"]:.4f} (pred={tr["pred_loss"]:.4f})  '
+        f'val={vl["loss"]:.4f}  '
+        f'lr={optimizer.param_groups[0]["lr"]:.2e}'
     )
 
     if vl['loss'] < best_val_loss:
@@ -254,6 +254,8 @@ for epoch in range(start_epoch, CFG.optim.epochs + 1):
         print(f'  ★ new best val_loss={best_val_loss:.4f}')
 
 print('\nStage 2 complete.')
+
+
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 epochs_range = list(range(1, len(history['train_loss']) + 1))
