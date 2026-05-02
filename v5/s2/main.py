@@ -147,11 +147,10 @@ def forward_step(batch):
     pred_loss = seq_mse_loss(pred_proj, tgt_proj, tgt_mask)
     loss = pred_loss
     
-    # DEBUG: Print actual values
-    if torch.isnan(loss) or torch.isinf(loss):
-        print(f"⚠️  NaN/Inf loss detected!")
-        print(f"   pred_proj min/max: {pred_proj.min():.6f} / {pred_proj.max():.6f}")
-        print(f"   tgt_proj min/max: {tgt_proj.min():.6f} / {tgt_proj.max():.6f}")
+    # DEBUG: Check projector output health
+    print(f"pred_proj norm: {pred_proj.norm(dim=-1).mean():.6f} (should be ~1)")
+    print(f"tgt_proj norm: {tgt_proj.norm(dim=-1).mean():.6f}")
+    print(f"pred_proj std: {pred_proj.std():.6f} (should be > 0.1)")
     
     return {'loss': loss, 'pred_loss': pred_loss}
 
