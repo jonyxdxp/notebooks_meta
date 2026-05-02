@@ -88,7 +88,12 @@ def train_linear_probe(
     probe = LinearProbe(feature_dim, num_classes).to(device)
     optimizer = torch.optim.Adam(probe.parameters(), lr=lr)
     dataset = TensorDataset(train_reps, train_labels)
-    loader  = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader  = DataLoader(
+    dataset, 
+    batch_size=batch_size, 
+    shuffle=True,
+    num_workers=0  # ← ADD THIS
+)
 
     probe.train()
     for epoch in range(epochs):
@@ -129,7 +134,11 @@ def evaluate_linear_probe(
     """
     probe.eval()
     dataset = TensorDataset(val_reps, val_labels)
-    loader  = DataLoader(dataset, batch_size=batch_size)
+    loader  = DataLoader(
+    dataset, 
+    batch_size=batch_size,
+    num_workers=0  # ← ADD THIS
+)
 
     total_loss, correct, n = 0.0, 0, 0
     for reps, labels in loader:

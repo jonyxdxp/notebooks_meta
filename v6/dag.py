@@ -430,12 +430,6 @@ class DistributionShiftDetector:
 
 
 
-dynamic levelspec period is now mutable 
-
-float; truncated to int period now mutable
-
-
-meta-learning
 
 
 # ---------------------------------------------------------------------------
