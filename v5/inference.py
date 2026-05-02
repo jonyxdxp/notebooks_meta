@@ -290,9 +290,12 @@ print(f'\n{"="*70}')
 print('  Quantitative: cosine similarity to Z_T_real')
 print(f'{"="*70}\n')
 
+
+
+
 @torch.no_grad()
-def eval_similarity(loader, n_batches=10):
-    sims = {'oracle': [], 'dynamics': [], 'random': []}
+def eval_similarity(loader, n_batches=10, reference_text=None):
+    sims = {'oracle': [], 'reference': [], 'dynamics': [], 'random': []}
 
     for batch_idx, batch in enumerate(loader):
         if batch_idx >= n_batches: break
@@ -318,28 +321,44 @@ def eval_similarity(loader, n_batches=10):
         z_dynamics = mu_dyn
         z_random   = torch.randn_like(Z_T_real)
 
+        # ← ADD REFERENCE MODE HERE
+        z_reference = None
+        if reference_text is not None:
+            z_ref = encode_reference(reference_text, B)
+            z_reference = goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_ref)
+
         Z_norm = F.normalize(Z_T_real, dim=-1)
-        for mode, z in [
+        
+        modes = [
             ('oracle',   z_oracle),
             ('dynamics', z_dynamics),
             ('random',   z_random),
-        ]:
+        ]
+        if z_reference is not None:
+            modes.insert(1, ('reference', z_reference))
+        
+        for mode, z in modes:
             sim = F.cosine_similarity(F.normalize(z, dim=-1), Z_norm).mean().item()
             sims[mode].append(sim)
 
     return {k: sum(v)/len(v) for k, v in sims.items()}
 
-sims = eval_similarity(val_loader)
+# Update the call:
+sims = eval_similarity(val_loader, reference_text=REFERENCE_TEXT)
 
+# And update the output section:
 print(f'  Avg cosine similarity to Z_T_real:\n')
-print(f'  Oracle   : {sims["oracle"]:.4f}   upper bound')
-print(f'  Dynamics : {sims["dynamics"]:.4f}   S2 only, no prior')
-print(f'  Random   : {sims["random"]:.4f}   lower bound')
+print(f'  Oracle    : {sims["oracle"]:.4f}   upper bound (Z_T_real itself)')
+print(f'  Reference : {sims.get("reference", 0):.4f}   PoE with learned prior')
+print(f'  Dynamics  : {sims["dynamics"]:.4f}   S2 only, no prior')
+print(f'  Random    : {sims["random"]:.4f}   lower bound')
 
-gap_oracle   = sims['oracle']   - sims['random']
+gap_oracle    = sims['oracle'] - sims['random']
+if 'reference' in sims:
+    gap_reference = sims['reference'] - sims['random']
+    print(f'\n  Reference recovery : {gap_reference/gap_oracle*100:.1f}%  of oracle gap')
 gap_dynamics = sims['dynamics'] - sims['random']
-
-print(f'\n  Dynamics recovery : {gap_dynamics/gap_oracle*100:.1f}%  of oracle gap')
-print(f'  Oracle recovery   : {gap_oracle/gap_oracle*100:.1f}%  (ceiling)')
-print(f'  σ_goal            : {goal_prior.get_sigma().item():.4f}')
+print(f'  Dynamics recovery  : {gap_dynamics/gap_oracle*100:.1f}%  of oracle gap')
+print(f'  Oracle recovery    : {gap_oracle/gap_oracle*100:.1f}%  (ceiling)')
+print(f'  σ_goal             : {goal_prior.get_sigma().item():.4f}')
 print(f'\n{"="*70}')
