@@ -131,7 +131,6 @@ def unpack(batch):
         batch['attention_mask_b'].to(DEVICE),
     )
 
-
 def forward_step(batch):
     ctx_ids, ctx_mask, tgt_ids, tgt_mask = unpack(batch)
 
@@ -145,15 +144,14 @@ def forward_step(batch):
     pred_proj = project_seq(projector, pred)
     tgt_proj  = project_seq(projector, tgt_h.detach())
 
-    # CHANGE: Only MSE loss, no VC loss
     pred_loss = seq_mse_loss(pred_proj, tgt_proj, tgt_mask)
-    
-    # Remove VC loss entirely:
-    # vc_loss, _, _ = regularizer(pred_flat)
-    # loss = pred_loss + vc_loss
-    
-    # New loss function:
     loss = pred_loss
+    
+    # DEBUG: Print actual values
+    if torch.isnan(loss) or torch.isinf(loss):
+        print(f"⚠️  NaN/Inf loss detected!")
+        print(f"   pred_proj min/max: {pred_proj.min():.6f} / {pred_proj.max():.6f}")
+        print(f"   tgt_proj min/max: {tgt_proj.min():.6f} / {tgt_proj.max():.6f}")
     
     return {'loss': loss, 'pred_loss': pred_loss}
 
@@ -242,16 +240,21 @@ for epoch in range(start_epoch, CFG.optim.epochs + 1):
     # Remove: history['val_vc'].append(...)
 
     print(
-        f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
-        f'train={tr["loss"]:.4f} (pred={tr["pred_loss"]:.4f})  '
-        f'val={vl["loss"]:.4f}  '
-        f'lr={optimizer.param_groups[0]["lr"]:.2e}'
+    f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
+    f'train={tr["loss"]:.6f} (pred={tr["pred_loss"]:.6f})  '  # 6 decimals instead of 4
+    f'val={vl["loss"]:.6f}  '
+    f'lr={optimizer.param_groups[0]["lr"]:.2e}'
     )
 
     if vl['loss'] < best_val_loss:
         best_val_loss = vl['loss']
-        save_best(epoch, best_val_loss)
-        print(f'  ★ new best val_loss={best_val_loss:.4f}')
+    
+    # DEBUG: Check for overfitting
+    if tr['loss'] > vl['loss'] * 2:
+        print(f'  ⚠️  Possible overfitting: train={tr["loss"]:.6f} >> val={vl["loss"]:.6f}')
+    
+    save_best(epoch, best_val_loss)
+    print(f'  ★ new best val_loss={best_val_loss:.4f}')
 
 print('\nStage 2 complete.')
 
