@@ -41,17 +41,16 @@ model:
     
   
   
-  
+  # S2 shouldn't use VC loss at all, lets use MSE
 
 loss:
-  # Variance-Covariance regularization (VICReg)
-  std_coeff: 1.0
-  cov_coeff: 1.0
+  std_coeff: 0.0    # Disable VC loss
+  cov_coeff: 0.0
 
 optim:
-  epochs: 20
+  epochs: 40        # Train longer (was 20)
   lr: 0.0001
-  weight_decay: 0.05
+  weight_decay: 0.01  # Reduce from 0.05
 
 training:
   use_amp: true         # Mixed precision
