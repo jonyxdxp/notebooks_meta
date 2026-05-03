@@ -214,12 +214,29 @@ decoder = Decoder(
 total_params = sum(p.numel() for p in decoder.parameters())
 print(f'Decoder params: {total_params:,}')
 
+
+
+
 # ── Optimizer ─────────────────────────────────────────────────────────────────
 
+N_EPOCHS = 20
 optimizer = AdamW(decoder.parameters(), lr=1e-4, weight_decay=0.05)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=20, eta_min=1e-5
-)
+    optimizer, T_max=N_EPOCHS, eta_min=1e-5)
+
+
+# THEN resume block:
+best_val_loss = float('inf')
+start_epoch = 1
+best_ckpt_path = SAVE_DIR / 'best.pt'
+if best_ckpt_path.exists():
+    ckpt = torch.load(best_ckpt_path, map_location=DEVICE, weights_only=False)
+    decoder.load_state_dict(ckpt['decoder'])
+    optimizer.load_state_dict(ckpt['optimizer'])
+    scheduler.load_state_dict(ckpt['scheduler'])
+    best_val_loss = ckpt['val_loss']
+    start_epoch = ckpt['epoch'] + 1
+    print(f'Resumed from epoch {ckpt["epoch"]}')
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
@@ -227,14 +244,14 @@ history = {
     'train_loss': [], 'train_ppl': [],
     'val_loss':   [], 'val_ppl':   [],
 }
-best_val_loss = float('inf')
+
 N_EPOCHS      = 20
 
 print(f'\n{"="*60}')
 print(f'  S3 Decoder — {N_EPOCHS} epochs   device={DEVICE}')
 print(f'{"="*60}\n')
 
-for epoch in range(1, N_EPOCHS + 1):
+for epoch in range(start_epoch, N_EPOCHS + 1):
 
     # ── Train ────────────────────────────────────────────────────────────────
     decoder.train()
@@ -345,7 +362,7 @@ with torch.no_grad():
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
 
-epochs_r = range(1, N_EPOCHS + 1)
+epochs_r = range(1, len(history['train_loss']) + 1)
 fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
 axes[0].plot(epochs_r, history['train_loss'], 'b-', label='train')
