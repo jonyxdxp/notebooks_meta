@@ -22,6 +22,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT     = '/content/notebooks_meta'
 S1       = f'{ROOT}/v5/s1'
@@ -30,6 +32,8 @@ S3       = f'{ROOT}/v5/s3'
 DEVICE   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 SAVE_DIR = Path('/content/drive/MyDrive/metanet/v5/s3/checkpoints')
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
+
+
 
 sys.path.insert(0, ROOT)
 
@@ -84,35 +88,24 @@ class S3Dataset(Dataset):
         }
 
 # ── Extract Z_T_real and collect target token ids ─────────────────────────────
-
-def extract_s3_data(s1_encoder, loader, device):
-    """
-    Extract:
-      z_T_real  : mean_pool(S1(turn_{t+1}))   (B, D)
-      tgt_ids   : token ids of turn_{t+1}      (B, L)
-      tgt_mask  : attention mask of turn_{t+1} (B, L)
-    """
-    all_z_T, all_tgt_ids, all_tgt_mask = [], [], []
-
+def extract_s3_data(s1_encoder, predictor, loader, device):
+    all_z, all_tgt_ids, all_tgt_mask = [], [], []
     with torch.no_grad():
-        for batch in tqdm(loader, desc='Extracting S3 data'):
+        for batch in tqdm(loader, desc='Extracting'):
+            ctx_ids  = batch['input_ids_a'].to(device)
+            ctx_mask = batch['attention_mask_a'].to(device)
             tgt_ids  = batch['input_ids_b'].to(device)
             tgt_mask = batch['attention_mask_b'].to(device)
 
-            # Z_T_real — oracle conditioning signal
-            tgt_h = s1_encoder(tgt_ids, attention_mask=tgt_mask)
-            if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
-            z_T   = mean_pool(tgt_h, tgt_mask)      # (B, D)
+            h = s1_encoder(ctx_ids, attention_mask=ctx_mask)
+            if isinstance(h, tuple): h = h[0]
+            z_ctx  = mean_pool(h, ctx_mask)
+            z_pred = predictor(z_ctx)          # ← S2 prediction, not oracle
 
-            all_z_T.append(z_T.cpu())
+            all_z.append(z_pred.cpu())
             all_tgt_ids.append(tgt_ids.cpu())
             all_tgt_mask.append(tgt_mask.cpu())
-
-    return (
-        torch.cat(all_z_T),       # (N, D)
-        torch.cat(all_tgt_ids),   # (N, L)
-        torch.cat(all_tgt_mask),  # (N, L)
-    )
+    return torch.cat(all_z), torch.cat(all_tgt_ids), torch.cat(all_tgt_mask)
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
 
@@ -146,6 +139,8 @@ def lm_loss(logits, tgt_ids, tgt_mask):
 
     return loss
 
+    
+
 # ── Load S1 encoder (frozen) ──────────────────────────────────────────────────
 
 s1_encoder = Encoder(
@@ -163,6 +158,22 @@ for p in s1_encoder.parameters():
     p.requires_grad = False
 print('S1 encoder loaded and frozen.')
 
+
+class TurnPredictor(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.net = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d*4), nn.GELU(), nn.Linear(d*4, d))
+    def forward(self, x): return x + self.net(x)
+
+predictor = TurnPredictor(CFG.model.hidden_size).to(DEVICE)
+s2_ckpt = torch.load('/content/drive/MyDrive/metanet/v5/s2/checkpoints/best.pt', map_location=DEVICE, weights_only=False)
+predictor.load_state_dict(s2_ckpt['predictor'])
+predictor.eval()
+for p in predictor.parameters(): p.requires_grad = False
+print('S2 predictor loaded and frozen.')
+
+
+
 # ── Dataloaders ───────────────────────────────────────────────────────────────
 
 train_loader, val_loader = get_stage2_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
@@ -173,6 +184,10 @@ print(f'Train batches: {len(train_loader)} | Val batches: {len(val_loader)}')
 cache_train = SAVE_DIR / 's3_data_train.pt'
 cache_val   = SAVE_DIR / 's3_data_val.pt'
 
+if cache_train.exists(): os.remove(cache_train)
+if cache_val.exists():   os.remove(cache_val)
+best_ckpt_path = SAVE_DIR / 'best.pt'
+
 if cache_train.exists():
     print('Loading cached S3 data...')
     tr = torch.load(cache_train, weights_only=False)
@@ -182,9 +197,9 @@ if cache_train.exists():
 else:
     print('Extracting S3 data (one time)...')
     z_T_train, tgt_ids_train, tgt_mask_train = extract_s3_data(
-        s1_encoder, train_loader, DEVICE)
+    s1_encoder, predictor, train_loader, DEVICE)
     z_T_val, tgt_ids_val, tgt_mask_val = extract_s3_data(
-        s1_encoder, val_loader, DEVICE)
+    s1_encoder, predictor, val_loader, DEVICE)
     torch.save({'z_T': z_T_train, 'tgt_ids': tgt_ids_train,
                 'tgt_mask': tgt_mask_train}, cache_train)
     torch.save({'z_T': z_T_val,   'tgt_ids': tgt_ids_val,
