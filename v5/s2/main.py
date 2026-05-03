@@ -94,12 +94,12 @@ print(f"Projector: {dstc}-{dstc*4}-{dstc*4}")
 # ========================== Loss / Optimizer ==========================
 
 ploss       = torch.nn.MSELoss()
+regularizer = VCLoss(std_coeff=CFG.loss.std_coeff, cov_coeff=CFG.loss.cov_coeff)
 
 trainable_params = list(predictor.parameters()) + list(projector.parameters())
-optimizer = AdamW(trainable_params, lr=CFG.optim.lr, weight_decay=0.01)  # reduce weight_decay
+optimizer = AdamW(trainable_params, lr=CFG.optim.lr, weight_decay=CFG.optim.weight_decay)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=CFG.optim.epochs, eta_min=CFG.optim.lr * 0.01)
-
+    optimizer, T_max=CFG.optim.epochs, eta_min=CFG.optim.lr * 0.1)
 # ========================== Helpers ==========================
 
 def project_seq(projector, x):
@@ -139,20 +139,26 @@ def forward_step(batch):
         tgt_h = target_encoder(tgt_ids, attention_mask=tgt_mask)
         if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
         if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
+    # ctx_h, tgt_h : (B, L, D)
 
-    pred = predictor(ctx_h, ctx_h)
-    pred_proj = project_seq(projector, pred)
-    tgt_proj  = project_seq(projector, tgt_h.detach())
+    # Predictor: secuencia completa, condicionado por sí mismo
+    pred = predictor(ctx_h, ctx_h)          # (B, L, D)
 
-    pred_loss = seq_mse_loss(pred_proj, tgt_proj, tgt_mask)
-    loss = pred_loss
-    
-    # DEBUG: Check projector output health
-    print(f"pred_proj norm: {pred_proj.norm(dim=-1).mean():.6f} (should be ~1)")
-    print(f"tgt_proj norm: {tgt_proj.norm(dim=-1).mean():.6f}")
-    print(f"pred_proj std: {pred_proj.std():.6f} (should be > 0.1)")
-    
-    return {'loss': loss, 'pred_loss': pred_loss}
+    # Proyectar secuencias completas
+    pred_proj = project_seq(projector, pred)            # (B, L, D')
+    tgt_proj  = project_seq(projector, tgt_h.detach()) # (B, L, D')
+
+    # Loss solo en tokens reales del target
+    pred_loss           = seq_mse_loss(pred_proj, tgt_proj, tgt_mask)
+
+    # VC loss: aplanar a (B*L, D') filtrando padding
+    B, L, Dp = pred_proj.shape
+    mask_flat = tgt_mask.reshape(B * L).bool()
+    pred_flat = pred_proj.reshape(B * L, Dp)[mask_flat]  # solo tokens reales
+    vc_loss, _, _ = regularizer(pred_flat)
+
+    loss = pred_loss + vc_loss
+    return {'loss': loss, 'pred_loss': pred_loss, 'vc_loss': vc_loss}
 
 
 def save_best(epoch, val_loss):
@@ -181,17 +187,17 @@ def validation_loop():
 
 # ========================== Training Loop ==========================
 
-# CHANGE: Remove 'train_vc' and 'val_vc' from history
-history = {'train_loss': [], 'train_pred': [],
-           'val_loss':   [], 'val_pred':   []}
+history = {'train_loss': [], 'train_pred': [], 'train_vc': [],
+           'val_loss':   [], 'val_pred':   [], 'val_vc':   []}
 
 best_val_loss = float('inf')
 Path(CFG.logging.exp_dir).mkdir(parents=True, exist_ok=True)
 
+# Resume desde best si existe
+# Resume desde best si existe
 best_ckpt = Path(CFG.logging.exp_dir) / 'best.pt'
 start_epoch = 1
 print('Training from scratch (epoch 1).')
-
 if best_ckpt.exists():
     ckpt = torch.load(best_ckpt, map_location=DEVICE, weights_only=False)
     predictor.load_state_dict(ckpt['predictor'])
@@ -207,8 +213,6 @@ else:
 print(f'\n{"="*60}')
 print(f'  Text JEPA S2 — {CFG.optim.epochs} epochs   device={DEVICE}')
 print(f'{"="*60}\n')
-
-
 
 for epoch in range(start_epoch, CFG.optim.epochs + 1):
     predictor.train(); projector.train()
@@ -229,40 +233,30 @@ for epoch in range(start_epoch, CFG.optim.epochs + 1):
     tr = {k: v/n for k, v in totals.items()}
     vl = validation_loop()
 
-    # CHANGE: Remove vc_loss lines
     history['train_loss'].append(tr['loss'].item() if torch.is_tensor(tr['loss']) else tr['loss'])
     history['train_pred'].append(tr['pred_loss'].item() if torch.is_tensor(tr['pred_loss']) else tr['pred_loss'])
-    # Remove: history['train_vc'].append(...)
-    
+    history['train_vc'].append(tr['vc_loss'].item() if torch.is_tensor(tr['vc_loss']) else tr['vc_loss'])
     history['val_loss'].append(vl['loss'])
     history['val_pred'].append(vl['pred_loss'])
-    # Remove: history['val_vc'].append(...)
+    history['val_vc'].append(vl['vc_loss'])
 
     print(
-    f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
-    f'train={tr["loss"]:.6f} (pred={tr["pred_loss"]:.6f})  '  # 6 decimals instead of 4
-    f'val={vl["loss"]:.6f}  '
-    f'lr={optimizer.param_groups[0]["lr"]:.2e}'
+        f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
+        f'train={tr["loss"]:.4f} (pred={tr["pred_loss"]:.4f} vc={tr["vc_loss"]:.4f})  '
+        f'val={vl["loss"]:.4f}  '
+        f'lr={optimizer.param_groups[0]["lr"]:.2e}'
     )
 
     if vl['loss'] < best_val_loss:
         best_val_loss = vl['loss']
-    
-    # DEBUG: Check for overfitting
-    if tr['loss'] > vl['loss'] * 2:
-        print(f'  ⚠️  Possible overfitting: train={tr["loss"]:.6f} >> val={vl["loss"]:.6f}')
-    
-    save_best(epoch, best_val_loss)
-    print(f'  ★ new best val_loss={best_val_loss:.4f}')
+        save_best(epoch, best_val_loss)
+        print(f'  ★ new best val_loss={best_val_loss:.4f}')
 
 print('\nStage 2 complete.')
 
-
-
 # ── Plotting ──────────────────────────────────────────────────────────────────
 epochs_range = list(range(1, len(history['train_loss']) + 1))
-# In plotting section, remove axes[2] and just keep [0] and [1]:
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
 axes[0].plot(epochs_range, history['train_loss'], 'b-o', label='Train', markersize=4)
 axes[0].plot(epochs_range, history['val_loss'],   'r-s', label='Val',   markersize=4)
@@ -271,6 +265,10 @@ axes[0].set_title('Total Loss'); axes[0].legend(); axes[0].grid(True, alpha=0.3)
 axes[1].plot(epochs_range, history['train_pred'], 'g-^', label='Train pred', markersize=4)
 axes[1].plot(epochs_range, history['val_pred'],   'm-v', label='Val pred',   markersize=4)
 axes[1].set_title('Prediction Loss (MSE)'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+
+axes[2].plot(epochs_range, history['train_vc'], 'c-o', label='Train VC', markersize=4)
+axes[2].plot(epochs_range, history['val_vc'],   'k-s', label='Val VC',   markersize=4)
+axes[2].set_title('VC Regularization Loss'); axes[2].legend(); axes[2].grid(True, alpha=0.3)
 
 plt.tight_layout()
 plot_path = Path(CFG.logging.exp_dir) / 'training_curves_stage2.png'
