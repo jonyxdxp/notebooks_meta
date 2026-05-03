@@ -78,7 +78,7 @@ print("Encoders frozen.")
 from v5.s2.cog_arch.dm import DM
 
 predictor = DM(
-    num_frames = CFG.model.max_seq_len,   # max_turns-1 = 5, but DM uses this for pos_embedding
+    num_frames = CFG.model.pred_num_frames,   # max_turns-1 = 5, but DM uses this for pos_embedding
     depth      = CFG.model.pred_num_layers,
     heads      = CFG.model.pred_num_heads,
     mlp_dim    = CFG.model.pred_hidden_size * 4,
@@ -111,26 +111,33 @@ def mean_pool(hidden, mask):
 
 
 def forward_step(batch):
-    hist_ids   = batch['history_ids'].to(DEVICE)    # (B, T, L)
-    hist_masks = batch['history_masks'].to(DEVICE)  # (B, T, L)
+    hist_ids   = batch['history_ids'].to(DEVICE)
+    hist_masks = batch['history_masks'].to(DEVICE)
     tgt_ids    = batch['tgt_ids'].to(DEVICE)
     tgt_mask   = batch['tgt_mask'].to(DEVICE)
 
     B, T, L = hist_ids.shape
 
     with torch.no_grad():
-        # encode all history turns at once
-        h = context_encoder(hist_ids.view(B*T, L), attention_mask=hist_masks.view(B*T, L))
-        if isinstance(h, tuple): h = h[0]
-        z_seq = mean_pool(h, hist_masks.view(B*T, L)).view(B, T, -1)  # (B, T, D)
+        flat_ids   = hist_ids.view(B*T, L)
+        flat_masks = hist_masks.view(B*T, L)
 
-        # encode target
+        valid  = flat_masks.sum(-1) > 0
+        D      = context_encoder.token_embedding.embedding_dim
+        z_flat = torch.zeros(B*T, D, device=DEVICE)
+
+        if valid.any():
+            h = context_encoder(flat_ids[valid], attention_mask=flat_masks[valid])
+            if isinstance(h, tuple): h = h[0]
+            z_flat[valid] = mean_pool(h, flat_masks[valid])
+
+        z_seq = z_flat.view(B, T, -1)
+
         tgt_h = context_encoder(tgt_ids, attention_mask=tgt_mask)
         if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
-        z_tgt = mean_pool(tgt_h, tgt_mask)  # (B, D)
+        z_tgt = mean_pool(tgt_h, tgt_mask)
 
-    # DM predicts next turn from history sequence
-    z_pred = predictor(z_seq, z_seq)[:, -1, :]
+    z_pred = predictor(z_seq, torch.zeros_like(z_seq))[:, -1, :]
     loss = F.mse_loss(z_pred, z_tgt)
     return {'loss': loss}
 

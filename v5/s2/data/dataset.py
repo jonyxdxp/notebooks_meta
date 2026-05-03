@@ -136,9 +136,9 @@ def get_multiturn_dataset(
 class MultiTurnCollator:
     def __call__(self, batch):
         return {
-            'history_ids':   torch.stack([torch.tensor(b['history_ids'])   for b in batch]),  # (B, T, L)
-            'history_masks': torch.stack([torch.tensor(b['history_masks']) for b in batch]),  # (B, T, L)
-            'history_len':   torch.tensor([b['history_len'] for b in batch]),                 # (B,)
-            'tgt_ids':       torch.stack([b['tgt_ids']   for b in batch]),                    # (B, L)
-            'tgt_mask':      torch.stack([b['tgt_mask']  for b in batch]),                    # (B, L)
+            'history_ids':   torch.stack([b['history_ids'].detach().clone()   if torch.is_tensor(b['history_ids'])   else torch.tensor(b['history_ids'])   for b in batch]),
+            'history_masks': torch.stack([b['history_masks'].detach().clone() if torch.is_tensor(b['history_masks']) else torch.tensor(b['history_masks']) for b in batch]),
+            'history_len':   torch.tensor([b['history_len'] for b in batch]),
+            'tgt_ids':       torch.stack([b['tgt_ids']   for b in batch]),
+            'tgt_mask':      torch.stack([b['tgt_mask']  for b in batch]),
         }
