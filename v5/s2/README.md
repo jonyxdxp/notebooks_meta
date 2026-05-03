@@ -13,7 +13,7 @@ actions directly (like a standard regression network), it learns an **energy fun
 ```ee
 E_θ(o, a)  →  ℝ
 ```
-
+ddd
 that scores the *compatibility* between an observation `o` and a candidate action
 trajectory `a`. Lower energy = higher compatibility with expert demonstrations.
 
