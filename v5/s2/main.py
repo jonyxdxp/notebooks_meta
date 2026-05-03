@@ -75,15 +75,20 @@ for enc in (context_encoder, target_encoder):
         p.requires_grad = False
 print("Encoders frozen.")
 
-class TurnPredictor(nn.Module):
-    def __init__(self, d):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(d), nn.Linear(d, d*4), nn.GELU(), nn.Linear(d*4, d)
-        )
-    def forward(self, x): return x + self.net(x)
+from v5.s2.cog_arch.dm import DM
 
-predictor = TurnPredictor(CFG.model.hidden_size).to(DEVICE)
+predictor = DM(
+    num_frames = CFG.model.max_seq_len,   # max_turns-1 = 5, but DM uses this for pos_embedding
+    depth      = CFG.model.pred_num_layers,
+    heads      = CFG.model.pred_num_heads,
+    mlp_dim    = CFG.model.pred_hidden_size * 4,
+    input_dim  = CFG.model.hidden_size,
+    hidden_dim = CFG.model.pred_hidden_size,
+    output_dim = CFG.model.hidden_size,
+    dim_head   = 64,
+    dropout    = 0.1,
+    emb_dropout= 0.1,
+).to(DEVICE)
 
 
 # ========================== Loss / Optimizer ==========================
@@ -102,27 +107,30 @@ def mean_pool(hidden, mask):
 
 
 
-def unpack(batch):
-    return (
-        batch['input_ids_a'].to(DEVICE),
-        batch['attention_mask_a'].to(DEVICE),
-        batch['input_ids_b'].to(DEVICE),
-        batch['attention_mask_b'].to(DEVICE),
-    )
 
 
 
 def forward_step(batch):
-    ctx_ids, ctx_mask, tgt_ids, tgt_mask = unpack(batch)
-    with torch.no_grad():
-        ctx_h = context_encoder(ctx_ids, attention_mask=ctx_mask)
-        tgt_h = target_encoder(tgt_ids, attention_mask=tgt_mask)
-        if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
-        if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
-        z_ctx = mean_pool(ctx_h, ctx_mask)   # ← move here
-        z_tgt = mean_pool(tgt_h, tgt_mask)
+    hist_ids   = batch['history_ids'].to(DEVICE)    # (B, T, L)
+    hist_masks = batch['history_masks'].to(DEVICE)  # (B, T, L)
+    tgt_ids    = batch['tgt_ids'].to(DEVICE)
+    tgt_mask   = batch['tgt_mask'].to(DEVICE)
 
-    z_pred = predictor(z_ctx)   # ← grad flows only through predictor
+    B, T, L = hist_ids.shape
+
+    with torch.no_grad():
+        # encode all history turns at once
+        h = context_encoder(hist_ids.view(B*T, L), attention_mask=hist_masks.view(B*T, L))
+        if isinstance(h, tuple): h = h[0]
+        z_seq = mean_pool(h, hist_masks.view(B*T, L)).view(B, T, -1)  # (B, T, D)
+
+        # encode target
+        tgt_h = context_encoder(tgt_ids, attention_mask=tgt_mask)
+        if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
+        z_tgt = mean_pool(tgt_h, tgt_mask)  # (B, D)
+
+    # DM predicts next turn from history sequence
+    z_pred = predictor(z_seq, z_seq)[:, -1, :]
     loss = F.mse_loss(z_pred, z_tgt)
     return {'loss': loss}
 

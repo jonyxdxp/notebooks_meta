@@ -1,109 +1,29 @@
-
-# ── Cell 3: Imports ───────────────────────────────────────────────────────────
-
-
-import os  # <-- Falta esto
-
-import copy
-import sys
-import typing
-
+import os
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import datasets
 import transformers
-import tokenizers
 
+# ── reuse tokenizer/config from s1 ───────────────────────────────────────────
+from v5.s1.data.dataset import tokenizer, CFG, VOCAB_SIZE
 
+MAX_TURNS = 6   # history window: up to 5 context turns + 1 target
 
-
-
-# Helper class to allow dot notation access to dictionary keys
-class _C:
-    def __init__(self, d):
-        for k, v in d.items():
-            setattr(self, k, _C(v) if isinstance(v, dict) else v)
-
-CFG_dict = dict(
-    # Model
-    hidden_size  = 256,
-    num_heads    = 4,       # 256 / 4 = 64 per head
-    num_layers   = 4,
-    max_seq_len  = 128,
-    mlp_ratio    = 4.0,
-
-    # JEPA masking
-    num_target_spans   = 4,
-    target_span_length = 8,
-
-    # Training
-    lr           = 1e-4,
-    weight_decay = 0.05,
-    n_epochs     = 20,
-    ema_decay     = 0.996,
-    batch_size   = 64,
-    eval_batch   = 128,
-    num_workers  = 0,
-
-    # VICReg
-    std_coeff = 50.0,   # was 25.0
-    cov_coeff = 1.0,
-
-    # Paths
-    cache_dir    = '/content/drive/MyDrive/data/cache',
-    ckpt_dir     = '/content/notebooks_meta/v4/s1/checkpoints',
-    raw_data_dir = '/content/data/dailydialog_processed', # Updated to new, consistent path for extracted data
-    tokenizer_name = 'bert-base-uncased',
-)
-
-CFG = _C(CFG_dict)
-print("Config:")
-
-
-
-
-
-
-tokenizer = transformers.AutoTokenizer.from_pretrained(CFG.tokenizer_name)
-# BERT already has [MASK], [PAD], [CLS], [SEP] — nothing to patch.
-# For GPT-style tokenizers that lack these tokens, add them here.
-
-VOCAB_SIZE = tokenizer.vocab_size
-print(f"Vocab : {VOCAB_SIZE}  |  mask_token_id : {tokenizer.mask_token_id}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ── Cell S2-1: Dataset — consecutive turn pairs ───────────────────────────────
-
-def get_turn_pair_dataset(
+def get_multiturn_dataset(
     cache_dir: str,
     tokenizer,
     block_size: int = 128,
+    max_turns: int = MAX_TURNS,
     raw_data_dir: str = CFG.raw_data_dir,
 ) -> datasets.DatasetDict:
     """
-    Builds a dataset of (turn_t, turn_{t+1}) pairs from dialogs.
-    Each example: two consecutive utterances from alternating speakers.
+    Each example: a conversation window of up to max_turns turns.
+      history_ids   : (max_turns-1, block_size)  — context turns (padded)
+      history_masks : (max_turns-1, block_size)
+      history_len   : int  — how many context turns are real (vs padded)
+      tgt_ids       : (block_size,)  — turn to predict
+      tgt_mask      : (block_size,)
     """
-    _cache_path = os.path.join(cache_dir, f'turn_pairs_bs{block_size}')
+    _cache_path = os.path.join(cache_dir, f'multiturn_mt{max_turns}_bs{block_size}')
     if os.path.exists(_cache_path):
         print(f'Loading from cache: {_cache_path}')
         return datasets.load_from_disk(_cache_path).with_format('torch')
@@ -114,94 +34,95 @@ def get_turn_pair_dataset(
         'test':       os.path.join(raw_data_dir, 'test',       'dialogues_test.txt'),
     }
 
-     # ── Step 1: download raw data if txt files not already on disk ────────────
-    if not all(os.path.exists(p) for p in split_txts.values()):
-        print('Downloading DailyDialog …')
+    # ── load dialogs ──────────────────────────────────────────────────────────
+    def _load_windows(filepath):
+        """
+        For each conversation, slide a window and yield:
+          history = turns[max(0, i-ctx_len) : i]
+          target  = turns[i]
+        where ctx_len = max_turns - 1
+        """
+        ctx_len = max_turns - 1
+        all_histories, all_history_lens, all_targets = [], [], []
 
-        raw = None
-
-        for repo in ['benjaminbeilharz/better_daily_dialog']:
-            try:
-                print(f'  trying {repo} …')
-                raw = datasets.load_dataset(repo)
-
-                import pandas as pd
-                split_dicts = {}
-                for split in raw:
-                    df = raw[split].to_pandas()
-                    dialogs = (
-                        df.sort_values(['dialog_id', 'turn_type'])
-                          .groupby('dialog_id')['utterance']
-                          .apply(list)
-                          .tolist()
-                    )
-                    split_dicts[split] = datasets.Dataset.from_dict({'dialog': dialogs})
-                raw = datasets.DatasetDict(split_dicts)
-
-                print(f'  ✓ loaded {sum(len(raw[s]) for s in raw):,} dialogues from {repo}')
-                break
-            except Exception as e:
-                print(f'  ✗ {e}')
-                raw = None
-
-        if raw is None:
-            raise RuntimeError("All dataset sources failed. Check your internet connection.")
-
-        for split, txt_path in split_txts.items():
-            os.makedirs(os.path.dirname(txt_path), exist_ok=True)
-            with open(txt_path, 'w', encoding='utf-8') as f:
-                for example in raw[split]:
-                    turns = [t.strip() for t in example['dialog'] if t.strip()]
-                    if turns:
-                        f.write(' __eou__ '.join(turns) + ' __eou__\n')
-            with open(txt_path) as f:
-                n = sum(1 for l in f if l.strip())
-            print(f'  wrote {split} ({n:,} dialogues) → {txt_path}')
-
-    def _load_pairs(filepath):
-        """Read dialogs and yield (turn_t, turn_{t+1}) consecutive pairs."""
-        pairs_a, pairs_b = [], []   # turn_t, turn_{t+1}
         with open(filepath, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 turns = [t.strip() for t in line.split('__eou__') if t.strip()]
-                # Every consecutive pair: (turn_0→turn_1), (turn_1→turn_2), ...
-                for i in range(len(turns) - 1):
-                    pairs_a.append(turns[i])
-                    pairs_b.append(turns[i + 1])
-        return pairs_a, pairs_b
+                if len(turns) < 2:
+                    continue
 
-    def _tokenize_pair(examples):
-        enc_a = tokenizer(
-            examples['turn_a'],
+                for i in range(1, len(turns)):
+                    history = turns[max(0, i - ctx_len): i]  # 1..ctx_len real turns
+                    target  = turns[i]
+
+                    # pad history on the LEFT with empty strings
+                    pad_len = ctx_len - len(history)
+                    padded  = [''] * pad_len + history
+
+                    all_histories.append(padded)          # list of ctx_len strings
+                    all_history_lens.append(len(history)) # how many are real
+                    all_targets.append(target)
+
+        return all_histories, all_history_lens, all_targets
+
+    PAD_ID = tokenizer.pad_token_id
+    ctx_len = max_turns - 1
+
+    def _tokenize(examples):
+        # histories: list[list[str]]  shape (batch, ctx_len)
+        # flatten → tokenize → reshape
+        batch_size = len(examples['target'])
+
+        # flatten all history turns into one list
+        flat_hist = [turn for hist in examples['history'] for turn in hist]
+        enc_hist  = tokenizer(
+            flat_hist,
             max_length=block_size, padding='max_length',
             truncation=True, return_attention_mask=True,
             return_token_type_ids=False,
         )
-        enc_b = tokenizer(
-            examples['turn_b'],
+        # reshape back to (batch, ctx_len, block_size)
+        hist_ids   = [enc_hist['input_ids'][i*ctx_len:(i+1)*ctx_len]   for i in range(batch_size)]
+        hist_masks = [enc_hist['attention_mask'][i*ctx_len:(i+1)*ctx_len] for i in range(batch_size)]
+
+        # zero out padded turns (empty string tokenizes to [CLS][SEP] — mask those out)
+        for b in range(batch_size):
+            real = examples['history_len'][b]
+            for t in range(ctx_len - real):   # left-padded positions
+                hist_ids[b][t]   = [PAD_ID] * block_size
+                hist_masks[b][t] = [0]       * block_size
+
+        enc_tgt = tokenizer(
+            examples['target'],
             max_length=block_size, padding='max_length',
             truncation=True, return_attention_mask=True,
             return_token_type_ids=False,
         )
+
         return {
-            'input_ids_a':      enc_a['input_ids'],
-            'attention_mask_a': enc_a['attention_mask'],
-            'input_ids_b':      enc_b['input_ids'],
-            'attention_mask_b': enc_b['attention_mask'],
+            'history_ids':   hist_ids,
+            'history_masks': hist_masks,
+            'history_len':   examples['history_len'],
+            'tgt_ids':       enc_tgt['input_ids'],
+            'tgt_mask':      enc_tgt['attention_mask'],
         }
 
-    print('Building turn-pair dataset …')
+    print('Building multi-turn dataset …')
     tokenized_splits = {}
     for split, txt_path in split_txts.items():
-        a, b = _load_pairs(txt_path)
-        print(f'  {split:12s}: {len(a):>6,} turn pairs')
-        raw_ds = datasets.Dataset.from_dict({'turn_a': a, 'turn_b': b})
+        histories, hist_lens, targets = _load_windows(txt_path)
+        print(f'  {split:12s}: {len(targets):>6,} windows')
+        raw_ds = datasets.Dataset.from_dict({
+            'history':     histories,
+            'history_len': hist_lens,
+            'target':      targets,
+        })
         tokenized_splits[split] = raw_ds.map(
-            _tokenize_pair, batched=True, num_proc=1,
-            remove_columns=['turn_a', 'turn_b'],
+            _tokenize, batched=True, num_proc=1,
+            remove_columns=['history', 'target'],
             desc=f'Tokenizing {split}',
         )
 
@@ -212,31 +133,12 @@ def get_turn_pair_dataset(
     return dataset_dict.with_format('torch')
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ── Cell S2-2: Collator ───────────────────────────────────────────────────────
-
-class TurnPairCollator:
-    """Simple collator — no masking needed, just stack pairs."""
+class MultiTurnCollator:
     def __call__(self, batch):
         return {
-            'input_ids_a':      torch.stack([b['input_ids_a']      for b in batch]),
-            'attention_mask_a': torch.stack([b['attention_mask_a'] for b in batch]),
-            'input_ids_b':      torch.stack([b['input_ids_b']      for b in batch]),
-            'attention_mask_b': torch.stack([b['attention_mask_b'] for b in batch]),
+            'history_ids':   torch.stack([torch.tensor(b['history_ids'])   for b in batch]),  # (B, T, L)
+            'history_masks': torch.stack([torch.tensor(b['history_masks']) for b in batch]),  # (B, T, L)
+            'history_len':   torch.tensor([b['history_len'] for b in batch]),                 # (B,)
+            'tgt_ids':       torch.stack([b['tgt_ids']   for b in batch]),                    # (B, L)
+            'tgt_mask':      torch.stack([b['tgt_mask']  for b in batch]),                    # (B, L)
         }

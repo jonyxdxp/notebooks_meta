@@ -37,6 +37,7 @@ model:
   pred_num_heads:   4
   pred_num_layers:  2
   dstc:             256
+  pred_num_frames: 8   # add this
 
     
   
