@@ -32,11 +32,7 @@ sys.path.insert(0, ROOT)
 # ── Config de S2 (explícito para no pisar s1/config.py) ──────────────────────
 from v5.s2.config import CFG, DEVICE
 
-# ═══ DELETE OLD CHECKPOINT BEFORE TRAINING ═══════════════════════════════════
-best_ckpt = Path(CFG.logging.exp_dir) / 'best.pt'
-if best_ckpt.exists():
-    os.remove(best_ckpt)
-    print(f'✓ Deleted old checkpoint: {best_ckpt}')
+
 # ════════════════════════════════════════════════════════════════════════════
 
 # ── Arquitecturas ─────────────────────────────────────────────────────────────
