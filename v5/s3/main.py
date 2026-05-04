@@ -92,19 +92,27 @@ def extract_s3_data(s1_encoder, predictor, loader, device):
     all_z, all_tgt_ids, all_tgt_mask = [], [], []
     with torch.no_grad():
         for batch in tqdm(loader, desc='Extracting'):
-            ctx_ids  = batch['input_ids_a'].to(device)
-            ctx_mask = batch['attention_mask_a'].to(device)
-            tgt_ids  = batch['input_ids_b'].to(device)
-            tgt_mask = batch['attention_mask_b'].to(device)
+            hist_ids   = batch['history_ids'].to(device)
+            hist_masks = batch['history_masks'].to(device)
+            tgt_ids    = batch['tgt_ids'].to(device)
+            tgt_mask   = batch['tgt_mask'].to(device)
+            B, T, L = hist_ids.shape
 
-            h = s1_encoder(ctx_ids, attention_mask=ctx_mask)
+            flat_ids, flat_masks = hist_ids.view(B*T, L), hist_masks.view(B*T, L)
+            valid  = flat_masks.sum(-1) > 0
+            D      = s1_encoder.token_embedding.embedding_dim
+            z_flat = torch.zeros(B*T, D, device=device)
+            h = s1_encoder(flat_ids[valid], attention_mask=flat_masks[valid])
             if isinstance(h, tuple): h = h[0]
-            z_ctx  = mean_pool(h, ctx_mask)
-            z_pred = predictor(z_ctx)          # ← S2 prediction, not oracle
+            z_flat[valid] = mean_pool(h, flat_masks[valid])
+            z_seq = z_flat.view(B, T, -1)
+
+            z_pred = predictor(z_seq, torch.zeros_like(z_seq))[:, -1, :]
 
             all_z.append(z_pred.cpu())
             all_tgt_ids.append(tgt_ids.cpu())
             all_tgt_mask.append(tgt_mask.cpu())
+
     return torch.cat(all_z), torch.cat(all_tgt_ids), torch.cat(all_tgt_mask)
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
