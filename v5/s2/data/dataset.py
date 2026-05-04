@@ -34,6 +34,43 @@ def get_multiturn_dataset(
         'test':       os.path.join(raw_data_dir, 'test',       'dialogues_test.txt'),
     }
 
+    # ── download raw data if txt files missing ────────────────────────────────
+    if not all(os.path.exists(p) for p in split_txts.values()):
+        print('Downloading DailyDialog …')
+        raw = None
+        for repo in ['benjaminbeilharz/better_daily_dialog']:
+            try:
+                raw = datasets.load_dataset(repo)
+                import pandas as pd
+                split_dicts = {}
+                for split in raw:
+                    df = raw[split].to_pandas()
+                    dialogs = (
+                        df.sort_values(['dialog_id', 'turn_type'])
+                          .groupby('dialog_id')['utterance']
+                          .apply(list).tolist()
+                    )
+                    split_dicts[split] = datasets.Dataset.from_dict({'dialog': dialogs})
+                raw = datasets.DatasetDict(split_dicts)
+                break
+            except Exception as e:
+                print(f'  ✗ {e}'); raw = None
+
+        if raw is None:
+            raise RuntimeError("Download failed.")
+
+        for split, txt_path in split_txts.items():
+            os.makedirs(os.path.dirname(txt_path), exist_ok=True)
+            with open(txt_path, 'w', encoding='utf-8') as f:
+                for example in raw[split]:
+                    turns = [t.strip() for t in example['dialog'] if t.strip()]
+                    if turns:
+                        f.write(' __eou__ '.join(turns) + ' __eou__\n')
+            print(f'  wrote {split} → {txt_path}')
+
+
+    
+
     # ── load dialogs ──────────────────────────────────────────────────────────
     def _load_windows(filepath):
         """
