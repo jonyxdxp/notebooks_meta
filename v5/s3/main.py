@@ -60,7 +60,7 @@ print(f'Device: {DEVICE}')
 
 def mean_pool(hidden, mask):
     mask_f = mask.unsqueeze(-1).float()
-    return (hidden * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
+    return (hidden * mask_f).sum(1) / mask_f.sum(1).clamp(min=1e-9)
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
@@ -167,17 +167,24 @@ for p in s1_encoder.parameters():
 print('S1 encoder loaded and frozen.')
 
 
-class TurnPredictor(nn.Module):
-    def __init__(self, d):
-        super().__init__()
-        self.net = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d*4), nn.GELU(), nn.Linear(d*4, d))
-    def forward(self, x): return x + self.net(x)
+# DELETE TurnPredictor class and replace with:
+from v5.s2.cog_arch.dm import DM
 
-predictor = TurnPredictor(CFG.model.hidden_size).to(DEVICE)
+predictor = DM(
+    num_frames = CFG.model.pred_num_frames,
+    depth      = CFG.model.pred_num_layers,
+    heads      = CFG.model.pred_num_heads,
+    mlp_dim    = CFG.model.pred_hidden_size * 4,
+    input_dim  = CFG.model.hidden_size,
+    hidden_dim = CFG.model.pred_hidden_size,
+    output_dim = CFG.model.hidden_size,
+    dim_head   = 64, dropout=0.1, emb_dropout=0.1,
+).to(DEVICE)
 s2_ckpt = torch.load('/content/drive/MyDrive/metanet/v5/s2/checkpoints/best.pt', map_location=DEVICE, weights_only=False)
 predictor.load_state_dict(s2_ckpt['predictor'])
 predictor.eval()
 for p in predictor.parameters(): p.requires_grad = False
+
 print('S2 predictor loaded and frozen.')
 
 
@@ -191,9 +198,12 @@ print(f'Train batches: {len(train_loader)} | Val batches: {len(val_loader)}')
 
 cache_train = SAVE_DIR / 's3_data_train.pt'
 cache_val   = SAVE_DIR / 's3_data_val.pt'
+best_ckpt_path = SAVE_DIR / 'best.pt'          # ← move here
 
 if cache_train.exists(): os.remove(cache_train)
 if cache_val.exists():   os.remove(cache_val)
+if best_ckpt_path.exists(): os.remove(best_ckpt_path)  # ← add this
+
 best_ckpt_path = SAVE_DIR / 'best.pt'
 
 if cache_train.exists():
