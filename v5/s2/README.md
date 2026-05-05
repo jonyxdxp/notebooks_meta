@@ -11,7 +11,7 @@ EBT-Policy is an **implicit visuomotor policy** for robotics. Rather than predic
 actions directly (like a standard regression network), it learns an **energy function**
 ddd
 ```ee
-E_θ(o, a)  →  ℝ
+E_θ(o, a)  →  ℝv
 ```
 ddd
 that scores the *compatibility* between an observation `o` and a candidate action
