@@ -13,7 +13,7 @@ ddd
 ```ee
 E_θ(o, a)  →  ℝv
 ```
-ddd
+dddg
 that scores the *compatibility* between an observation `o` and a candidate action
 trajectory `a`. Lower energy = higher compatibility with expert demonstrations.
 
