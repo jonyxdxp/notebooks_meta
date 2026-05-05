@@ -129,9 +129,10 @@ def forward_step(batch):
 
     z_pred = predictor(z_seq)                     # (B, L, D)  ← fixed
 
-    mask = tgt_mask.unsqueeze(-1).float()
-    loss = (F.mse_loss(z_pred, z_tgt, reduction='none') * mask).sum() \
-           / mask.sum().clamp(min=1)
+   
+    z_pred_pool = mean_pool(z_pred, tgt_mask)
+    z_tgt_pool  = mean_pool(z_tgt,  tgt_mask)
+    loss = 1 - F.cosine_similarity(z_pred_pool, z_tgt_pool, dim=-1).mean()
 
     return {'loss': loss}
 
