@@ -33,7 +33,7 @@ else:
 
 # Crear directorios
 os.makedirs(CFG.logging.exp_dir, exist_ok=True)
-os.makedirs(os.path.join(CFG.logging.exp_dir, "/content/drive/MyDrive/metanet/v5/s2/checkpoints"), exist_ok=True)
+
 
 # Actualizar s1_ckpt si es null
 if CFG.training.s1_ckpt is None or CFG.training.s1_ckpt == "null":

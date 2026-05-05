@@ -74,8 +74,8 @@ print("Encoders frozen.")
 from v5.s2.cog_arch.dm import DM
 
 predictor = DM(
-    num_turns  = CFG.model.max_turns - 1,       # T = 5
-    seq_len    = CFG.model.max_seq_len,          # L = 128
+    num_turns  = CFG.model.max_turns - 1,   # 5
+    seq_len    = CFG.model.max_seq_len,      # 128
     depth      = CFG.model.pred_num_layers,
     heads      = CFG.model.pred_num_heads,
     mlp_dim    = CFG.model.pred_hidden_size * 4,
@@ -104,47 +104,40 @@ def mean_pool(hidden, mask):
 
 
 
-
 def forward_step(batch):
-    hist_ids   = batch['history_ids'].to(DEVICE)    # (B, T, L)
-    hist_masks = batch['history_masks'].to(DEVICE)  # (B, T, L)
-    tgt_ids    = batch['tgt_ids'].to(DEVICE)        # (B, L)
-    tgt_mask   = batch['tgt_mask'].to(DEVICE)       # (B, L)
+    hist_ids   = batch['history_ids'].to(DEVICE)
+    hist_masks = batch['history_masks'].to(DEVICE)
+    tgt_ids    = batch['tgt_ids'].to(DEVICE)
+    tgt_mask   = batch['tgt_mask'].to(DEVICE)
 
     B, T, L = hist_ids.shape
 
     with torch.no_grad():
-        # ── encode history turns (token-level, no pooling) ────────────────
-        flat_ids   = hist_ids.view(B*T, L)           # (B*T, L)
-        flat_masks = hist_masks.view(B*T, L)         # (B*T, L)
+        flat_ids   = hist_ids.view(B*T, L)
+        flat_masks = hist_masks.view(B*T, L)
 
         h_flat = context_encoder(flat_ids, attention_mask=flat_masks)
-        # h_flat: (B*T, L, D)
         D = h_flat.shape[-1]
 
-        # zero out padded turns (empty turns still get non-zero encoder output)
-        valid_turns = (flat_masks.sum(-1) > 0)       # (B*T,)
+        valid_turns = (flat_masks.sum(-1) > 0)
         h_flat[~valid_turns] = 0.0
 
-        z_seq = h_flat.view(B, T, L, D)             # (B, T, L, D)
+        z_seq = h_flat.view(B, T, L, D)          # (B, T, L, D)
 
-        # ── encode target with TARGET encoder (fix bug) ───────────────────
         tgt_h = target_encoder(tgt_ids, attention_mask=tgt_mask)
-        z_tgt = tgt_h                                # (B, L, D)
+        z_tgt = tgt_h                             # (B, L, D)
 
-    # ── flatten history for predictor ─────────────────────────────────────
-    z_flat = z_seq.view(B, T*L, D)                  # (B, T*L, D)
+    z_pred = predictor(z_seq)                     # (B, L, D)  ← fixed
 
-    # ── predict next turn token embeddings ────────────────────────────────
-    z_pred = predictor(z_flat)[:, -L:, :]           # (B, L, D)
-
-    # ── masked MSE (ignore padding positions in target) ───────────────────
-    mask   = tgt_mask.unsqueeze(-1).float()          # (B, L, 1)
-    loss   = (F.mse_loss(z_pred, z_tgt, reduction='none') * mask).sum() \
-             / mask.sum().clamp(min=1)
+    mask = tgt_mask.unsqueeze(-1).float()
+    loss = (F.mse_loss(z_pred, z_tgt, reduction='none') * mask).sum() \
+           / mask.sum().clamp(min=1)
 
     return {'loss': loss}
 
+
+
+    
 
 def save_best(epoch, val_loss):
     path = Path(CFG.logging.exp_dir) / 'best.pt'
