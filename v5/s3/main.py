@@ -100,14 +100,16 @@ def extract_s3_data(s1_encoder, predictor, loader, device):
 
             flat_ids, flat_masks = hist_ids.view(B*T, L), hist_masks.view(B*T, L)
             valid  = flat_masks.sum(-1) > 0
-            D      = s1_encoder.token_embedding.embedding_dim
-            z_flat = torch.zeros(B*T, D, device=device)
-            h = s1_encoder(flat_ids[valid], attention_mask=flat_masks[valid])
-            if isinstance(h, tuple): h = h[0]
-            z_flat[valid] = mean_pool(h, flat_masks[valid])
-            z_seq = z_flat.view(B, T, -1)
+            
 
-            z_pred = predictor(z_seq, torch.zeros_like(z_seq))[:, -1, :]
+            h_flat = s1_encoder(flat_ids, attention_mask=flat_masks)
+            if isinstance(h_flat, tuple): h_flat = h_flat[0]   # (B*T, L, D)
+            h_flat[~valid] = 0.0
+            z_seq  = h_flat.view(B, T, L, -1)                  # (B, T, L, D)
+            z_pred = predictor(z_seq)                           # (B, L, D)
+
+           
+            
 
             all_z.append(z_pred.cpu())
             all_tgt_ids.append(tgt_ids.cpu())
@@ -171,15 +173,18 @@ print('S1 encoder loaded and frozen.')
 from v5.s2.cog_arch.dm import DM
 
 predictor = DM(
-    num_frames = CFG.model.pred_num_frames,
+    num_turns  = CFG.model.max_turns - 1,   # 5
+    seq_len    = CFG.model.max_seq_len,      # 128
     depth      = CFG.model.pred_num_layers,
     heads      = CFG.model.pred_num_heads,
     mlp_dim    = CFG.model.pred_hidden_size * 4,
     input_dim  = CFG.model.hidden_size,
     hidden_dim = CFG.model.pred_hidden_size,
     output_dim = CFG.model.hidden_size,
-    dim_head   = 64, dropout=0.1, emb_dropout=0.1,
+    dim_head=64, dropout=0.1, emb_dropout=0.1,
 ).to(DEVICE)
+
+
 s2_ckpt = torch.load('/content/drive/MyDrive/metanet/v5/s2/checkpoints/best.pt', map_location=DEVICE, weights_only=False)
 predictor.load_state_dict(s2_ckpt['predictor'])
 predictor.eval()

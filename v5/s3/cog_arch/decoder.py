@@ -146,7 +146,7 @@ class Decoder(nn.Module):
 
         # z_fused: (B, D) → (B, 1, D) for cross-attention
         # Each token attends to z_fused as a single context vector
-        z_ctx = z_fused.unsqueeze(1)   # (B, 1, context_dim)
+        z_ctx = z_fused if z_fused.dim() == 3 else z_fused.unsqueeze(1)  # (B, L, D) or (B, 1, D)
 
         # Causal mask
         causal_mask = torch.triu(
