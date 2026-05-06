@@ -63,47 +63,35 @@ def mean_pool(hidden, mask):
     return (hidden * mask_f).sum(1) / mask_f.sum(1).clamp(min=1e-9)
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
+
 class S3Dataset(Dataset):
-    def __init__(self, chunk_files):
-        self.chunks = []
-        offset = 0
-        self.index = []   # maps global idx → (chunk_idx, local_idx)
-        for ci, cf in enumerate(chunk_files):
-            c = torch.load(cf, weights_only=False)
-            self.chunks.append(c)
-            for li in range(c['z_T'].shape[0]):
-                self.index.append((ci, li))
+    """
+    Each item:
+      z_T_real  : (D,)   — S1 encoding of turn_{t+1}  (oracle conditioning)
+      tgt_ids   : (L,)   — token ids of turn_{t+1}    (generation target)
+      tgt_mask  : (L,)   — attention mask of turn_{t+1}
+    """
+    def __init__(self, z_T, tgt_ids, tgt_mask):
+        assert z_T.size(0) == tgt_ids.size(0)
+        self.z_T      = z_T
+        self.tgt_ids  = tgt_ids
+        self.tgt_mask = tgt_mask
 
     def __len__(self):
-        return len(self.index)
+        return self.z_T.size(0)
 
     def __getitem__(self, idx):
-        ci, li = self.index[idx]
-        c = self.chunks[ci]
         return {
-            'z_T':     c['z_T'][li].float(),
-            'tgt_ids': c['tgt_ids'][li],
-            'tgt_mask':c['tgt_mask'][li],
+            'z_T':      self.z_T[idx],
+            'tgt_ids':  self.tgt_ids[idx],
+            'tgt_mask': self.tgt_mask[idx],
         }
 
 # ── Extract Z_T_real and collect target token ids ─────────────────────────────
-def extract_s3_data(s1_encoder, predictor, loader, device, save_path):
-    save_path = Path(save_path)
-    z_chunks, id_chunks, mask_chunks = [], [], []
-    chunk_idx = 0
-
-    def flush(idx):
-        p = save_path.parent / f'{save_path.stem}_chunk{idx}.pt'
-        torch.save({
-            'z_T':      torch.cat(z_chunks).float(),
-            'tgt_ids':  torch.cat(id_chunks),
-            'tgt_mask': torch.cat(mask_chunks),
-        }, p)
-        z_chunks.clear(); id_chunks.clear(); mask_chunks.clear()
-        torch.cuda.empty_cache()
-        print(f'  flushed → {p}')
-        return idx + 1
-
+def extract_s3_data(s1_encoder, predictor, loader, device, save_path=None):
+    """Extracts and optionally saves incrementally to avoid OOM on save."""
+    all_z, all_tgt_ids, all_tgt_mask = [], [], []
+    
     with torch.no_grad():
         for i, batch in enumerate(tqdm(loader, desc='Extracting')):
             hist_ids   = batch['history_ids'].to(device)
@@ -111,26 +99,32 @@ def extract_s3_data(s1_encoder, predictor, loader, device, save_path):
             tgt_ids    = batch['tgt_ids'].to(device)
             tgt_mask   = batch['tgt_mask'].to(device)
             B, T, L    = hist_ids.shape
+
             flat_ids   = hist_ids.view(B*T, L)
             flat_masks = hist_masks.view(B*T, L)
             valid      = flat_masks.sum(-1) > 0
+
             h_flat = s1_encoder(flat_ids, attention_mask=flat_masks)
             if isinstance(h_flat, tuple): h_flat = h_flat[0]
             h_flat[~valid] = 0.0
-            z_pred = predictor(h_flat.view(B, T, L, -1))
-            z_chunks.append(z_pred.cpu().half())
-            id_chunks.append(tgt_ids.cpu())
-            mask_chunks.append(tgt_mask.cpu())
-            if (i + 1) % 100 == 0:
-                chunk_idx = flush(chunk_idx)
+            z_pred = predictor(h_flat.view(B, T, L, -1))   # (B, L, D)
 
-    if z_chunks:
-        chunk_idx = flush(chunk_idx)
+            all_z.append(z_pred.cpu().half())   # ← save as float16, halves memory
+            all_tgt_ids.append(tgt_ids.cpu())
+            all_tgt_mask.append(tgt_mask.cpu())
 
-    # return chunk file list — Dataset will load lazily
-    chunk_files = sorted(save_path.parent.glob(f'{save_path.stem}_chunk*.pt'))
-    print(f'Extraction done: {chunk_idx} chunks → {save_path.parent}')
-    return chunk_files
+            if i % 50 == 0:
+                torch.cuda.empty_cache()
+
+    z      = torch.cat(all_z).float()   # back to float32 for training
+    ids    = torch.cat(all_tgt_ids)
+    masks  = torch.cat(all_tgt_mask)
+
+    if save_path:
+        torch.save({'z_T': z, 'tgt_ids': ids, 'tgt_mask': masks}, save_path)
+        print(f'Saved {z.shape} → {save_path}')
+
+    return z, ids, masks
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
 
@@ -220,38 +214,71 @@ print(f'Train batches: {len(train_loader)} | Val batches: {len(val_loader)}')
 
 # ── Extract and cache S3 data ─────────────────────────────────────────────────
 
+# ── Extract and cache S3 data ─────────────────────────────────────────────────
 
-# REPLACE the entire extraction section with just this:
+cache_train    = SAVE_DIR / 's3_data_train.pt'
+cache_val      = SAVE_DIR / 's3_data_val.pt'
 
-cache_train    = Path('/content/s3_data_train.pt')   # local, fast
-cache_val      = Path('/content/s3_data_val.pt')
-best_ckpt_path = SAVE_DIR / 'best.pt'                # decoder checkpoint still on Drive
-
-manifest_train = Path(str(cache_train) + '.manifest')
-manifest_val   = Path(str(cache_val)   + '.manifest')
-
-if not manifest_train.exists():
-    print('Extracting train...')
-    train_chunks = extract_s3_data(s1_encoder, predictor, train_loader, DEVICE, cache_train)
-    torch.save([str(f) for f in train_chunks], manifest_train)
+if cache_train.exists() and cache_val.exists():
+    print('Loading cached S3 data...')
+    tr = torch.load(cache_train, weights_only=False)
+    vl = torch.load(cache_val,   weights_only=False)
+    z_T_train, tgt_ids_train, tgt_mask_train = tr['z_T'], tr['tgt_ids'], tr['tgt_mask']
+    z_T_val,   tgt_ids_val,   tgt_mask_val   = vl['z_T'], vl['tgt_ids'], vl['tgt_mask']
 else:
-    train_chunks = [Path(f) for f in torch.load(manifest_train, weights_only=False)]
+    print('Extracting S3 data (using S1 target encoding directly, no S2)...')
+    
+    all_z, all_tgt_ids, all_tgt_mask = [], [], []
+    
+    with torch.no_grad():
+        for batch in tqdm(train_loader, desc='Extracting train'):
+            tgt_ids    = batch['tgt_ids'].to(DEVICE)
+            tgt_mask   = batch['tgt_mask'].to(DEVICE)
+            
+            # Use S1 target encoder directly (oracle conditioning)
+            tgt_h = s1_encoder(tgt_ids, attention_mask=tgt_mask)
+            if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
+            z_T = mean_pool(tgt_h, tgt_mask)  # (B, D) → pool over sequence
+            
+            all_z.append(z_T.cpu())
+            all_tgt_ids.append(tgt_ids.cpu())
+            all_tgt_mask.append(tgt_mask.cpu())
+            torch.cuda.empty_cache()
+    
+    z_T_train = torch.cat(all_z)
+    tgt_ids_train = torch.cat(all_tgt_ids)
+    tgt_mask_train = torch.cat(all_tgt_mask)
+    
+    torch.save({'z_T': z_T_train, 'tgt_ids': tgt_ids_train, 'tgt_mask': tgt_mask_train}, cache_train)
+    
+    # Same for val
+    all_z, all_tgt_ids, all_tgt_mask = [], [], []
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc='Extracting val'):
+            tgt_ids    = batch['tgt_ids'].to(DEVICE)
+            tgt_mask   = batch['tgt_mask'].to(DEVICE)
+            
+            tgt_h = s1_encoder(tgt_ids, attention_mask=tgt_mask)
+            if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
+            z_T = mean_pool(tgt_h, tgt_mask)
+            
+            all_z.append(z_T.cpu())
+            all_tgt_ids.append(tgt_ids.cpu())
+            all_tgt_mask.append(tgt_mask.cpu())
+            torch.cuda.empty_cache()
+    
+    z_T_val = torch.cat(all_z)
+    tgt_ids_val = torch.cat(all_tgt_ids)
+    tgt_mask_val = torch.cat(all_tgt_mask)
+    
+    torch.save({'z_T': z_T_val, 'tgt_ids': tgt_ids_val, 'tgt_mask': tgt_mask_val}, cache_val)
 
-if not manifest_val.exists():
-    print('Extracting val...')
-    val_chunks = extract_s3_data(s1_encoder, predictor, val_loader, DEVICE, cache_val)
-    torch.save([str(f) for f in val_chunks], manifest_val)
-else:
-    val_chunks = [Path(f) for f in torch.load(manifest_val, weights_only=False)]
-
-train_ds = S3Dataset(train_chunks)
-val_ds   = S3Dataset(val_chunks)
-print(f'Train: {len(train_ds)} | Val: {len(val_ds)}')
-
+print(f'Train: {z_T_train.shape} | Val: {z_T_val.shape}')
 
 # ── Build datasets ────────────────────────────────────────────────────────────
 
-
+train_ds = S3Dataset(z_T_train, tgt_ids_train, tgt_mask_train)
+val_ds   = S3Dataset(z_T_val,   tgt_ids_val,   tgt_mask_val)
 
 s3_train_loader = DataLoader(train_ds, batch_size=64, shuffle=True,  num_workers=0)
 s3_val_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False, num_workers=0)
@@ -390,10 +417,8 @@ decoder.eval()
 
 with torch.no_grad():
     # Take first 3 val examples
-    # Take first 3 val examples from dataset directly
-    sample = [val_ds[i] for i in range(3)]
-    sample_z_T  = torch.stack([s['z_T']     for s in sample]).to(DEVICE)  # (3, L, D)
-    sample_tgt  = torch.stack([s['tgt_ids'] for s in sample])              # (3, L)
+    sample_z_T    = z_T_val[:3].to(DEVICE)
+    sample_tgt    = tgt_ids_val[:3]
 
     # Prompt: just [CLS] token (101 in BERT)
     prompt = torch.full((3, 1), 101, dtype=torch.long, device=DEVICE)
