@@ -91,29 +91,30 @@ class S3Dataset(Dataset):
 def extract_s3_data(s1_encoder, predictor, loader, device):
     all_z, all_tgt_ids, all_tgt_mask = [], [], []
     with torch.no_grad():
-        for batch in tqdm(loader, desc='Extracting'):
+        for i, batch in enumerate(tqdm(loader, desc='Extracting')):
             hist_ids   = batch['history_ids'].to(device)
             hist_masks = batch['history_masks'].to(device)
             tgt_ids    = batch['tgt_ids'].to(device)
             tgt_mask   = batch['tgt_mask'].to(device)
             B, T, L = hist_ids.shape
 
-            flat_ids, flat_masks = hist_ids.view(B*T, L), hist_masks.view(B*T, L)
-            valid  = flat_masks.sum(-1) > 0
-            
+            flat_ids   = hist_ids.view(B*T, L)
+            flat_masks = hist_masks.view(B*T, L)
+            valid      = flat_masks.sum(-1) > 0
 
             h_flat = s1_encoder(flat_ids, attention_mask=flat_masks)
-            if isinstance(h_flat, tuple): h_flat = h_flat[0]   # (B*T, L, D)
+            if isinstance(h_flat, tuple): h_flat = h_flat[0]
             h_flat[~valid] = 0.0
-            z_seq  = h_flat.view(B, T, L, -1)                  # (B, T, L, D)
-            z_pred = predictor(z_seq)                           # (B, L, D)
-
-           
-            
+            z_seq  = h_flat.view(B, T, L, -1)
+            z_pred = predictor(z_seq)
 
             all_z.append(z_pred.cpu())
             all_tgt_ids.append(tgt_ids.cpu())
             all_tgt_mask.append(tgt_mask.cpu())
+
+            # free GPU memory every 50 batches
+            if i % 50 == 0:
+                torch.cuda.empty_cache()
 
     return torch.cat(all_z), torch.cat(all_tgt_ids), torch.cat(all_tgt_mask)
 
@@ -196,7 +197,11 @@ print('S2 predictor loaded and frozen.')
 
 # ── Dataloaders ───────────────────────────────────────────────────────────────
 
-train_loader, val_loader = get_stage2_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
+train_loader, val_loader = get_stage2_dataloaders(
+    cfg_obj=CFG, tokenizer=tokenizer,
+    # override batch size for extraction
+)
+
 print(f'Train batches: {len(train_loader)} | Val batches: {len(val_loader)}')
 
 # ── Extract and cache S3 data ─────────────────────────────────────────────────
