@@ -88,15 +88,17 @@ class S3Dataset(Dataset):
         }
 
 # ── Extract Z_T_real and collect target token ids ─────────────────────────────
-def extract_s3_data(s1_encoder, predictor, loader, device):
+def extract_s3_data(s1_encoder, predictor, loader, device, save_path=None):
+    """Extracts and optionally saves incrementally to avoid OOM on save."""
     all_z, all_tgt_ids, all_tgt_mask = [], [], []
+    
     with torch.no_grad():
         for i, batch in enumerate(tqdm(loader, desc='Extracting')):
             hist_ids   = batch['history_ids'].to(device)
             hist_masks = batch['history_masks'].to(device)
             tgt_ids    = batch['tgt_ids'].to(device)
             tgt_mask   = batch['tgt_mask'].to(device)
-            B, T, L = hist_ids.shape
+            B, T, L    = hist_ids.shape
 
             flat_ids   = hist_ids.view(B*T, L)
             flat_masks = hist_masks.view(B*T, L)
@@ -105,18 +107,24 @@ def extract_s3_data(s1_encoder, predictor, loader, device):
             h_flat = s1_encoder(flat_ids, attention_mask=flat_masks)
             if isinstance(h_flat, tuple): h_flat = h_flat[0]
             h_flat[~valid] = 0.0
-            z_seq  = h_flat.view(B, T, L, -1)
-            z_pred = predictor(z_seq)
+            z_pred = predictor(h_flat.view(B, T, L, -1))   # (B, L, D)
 
-            all_z.append(z_pred.cpu())
+            all_z.append(z_pred.cpu().half())   # ← save as float16, halves memory
             all_tgt_ids.append(tgt_ids.cpu())
             all_tgt_mask.append(tgt_mask.cpu())
 
-            # free GPU memory every 50 batches
             if i % 50 == 0:
                 torch.cuda.empty_cache()
 
-    return torch.cat(all_z), torch.cat(all_tgt_ids), torch.cat(all_tgt_mask)
+    z      = torch.cat(all_z).float()   # back to float32 for training
+    ids    = torch.cat(all_tgt_ids)
+    masks  = torch.cat(all_tgt_mask)
+
+    if save_path:
+        torch.save({'z_T': z, 'tgt_ids': ids, 'tgt_mask': masks}, save_path)
+        print(f'Saved {z.shape} → {save_path}')
+
+    return z, ids, masks
 
 # ── Loss ──────────────────────────────────────────────────────────────────────
 
@@ -223,10 +231,7 @@ else:
     if not cache_train.exists():
         print('Extracting train...')
         z_T_train, tgt_ids_train, tgt_mask_train = extract_s3_data(
-            s1_encoder, predictor, train_loader, DEVICE)
-        torch.save({'z_T': z_T_train, 'tgt_ids': tgt_ids_train,
-                    'tgt_mask': tgt_mask_train}, cache_train)
-        print(f'Train saved: {z_T_train.shape}')
+            s1_encoder, predictor, train_loader, DEVICE, save_path=cache_train)
     else:
         tr = torch.load(cache_train, weights_only=False)
         z_T_train, tgt_ids_train, tgt_mask_train = tr['z_T'], tr['tgt_ids'], tr['tgt_mask']
@@ -234,10 +239,7 @@ else:
     if not cache_val.exists():
         print('Extracting val...')
         z_T_val, tgt_ids_val, tgt_mask_val = extract_s3_data(
-            s1_encoder, predictor, val_loader, DEVICE)
-        torch.save({'z_T': z_T_val, 'tgt_ids': tgt_ids_val,
-                    'tgt_mask': tgt_mask_val}, cache_val)
-        print(f'Val saved: {z_T_val.shape}')
+            s1_encoder, predictor, val_loader, DEVICE, save_path=cache_val)
     else:
         vl = torch.load(cache_val, weights_only=False)
         z_T_val, tgt_ids_val, tgt_mask_val = vl['z_T'], vl['tgt_ids'], vl['tgt_mask']
