@@ -206,34 +206,44 @@ print(f'Train batches: {len(train_loader)} | Val batches: {len(val_loader)}')
 
 # ── Extract and cache S3 data ─────────────────────────────────────────────────
 
-cache_train = SAVE_DIR / 's3_data_train.pt'
-cache_val   = SAVE_DIR / 's3_data_val.pt'
-best_ckpt_path = SAVE_DIR / 'best.pt'          # ← move here
 
-if cache_train.exists(): os.remove(cache_train)
-if cache_val.exists():   os.remove(cache_val)
-if best_ckpt_path.exists(): os.remove(best_ckpt_path)  # ← add this
+# REPLACE the entire extraction section with just this:
 
+cache_train    = SAVE_DIR / 's3_data_train.pt'
+cache_val      = SAVE_DIR / 's3_data_val.pt'
 best_ckpt_path = SAVE_DIR / 'best.pt'
 
-if cache_train.exists():
+if cache_train.exists() and cache_val.exists():
     print('Loading cached S3 data...')
     tr = torch.load(cache_train, weights_only=False)
     vl = torch.load(cache_val,   weights_only=False)
     z_T_train, tgt_ids_train, tgt_mask_train = tr['z_T'], tr['tgt_ids'], tr['tgt_mask']
     z_T_val,   tgt_ids_val,   tgt_mask_val   = vl['z_T'], vl['tgt_ids'], vl['tgt_mask']
 else:
-    print('Extracting S3 data (one time)...')
-    z_T_train, tgt_ids_train, tgt_mask_train = extract_s3_data(
-    s1_encoder, predictor, train_loader, DEVICE)
-    z_T_val, tgt_ids_val, tgt_mask_val = extract_s3_data(
-    s1_encoder, predictor, val_loader, DEVICE)
-    torch.save({'z_T': z_T_train, 'tgt_ids': tgt_ids_train,
-                'tgt_mask': tgt_mask_train}, cache_train)
-    torch.save({'z_T': z_T_val,   'tgt_ids': tgt_ids_val,
-                'tgt_mask': tgt_mask_val},   cache_val)
+    if not cache_train.exists():
+        print('Extracting train...')
+        z_T_train, tgt_ids_train, tgt_mask_train = extract_s3_data(
+            s1_encoder, predictor, train_loader, DEVICE)
+        torch.save({'z_T': z_T_train, 'tgt_ids': tgt_ids_train,
+                    'tgt_mask': tgt_mask_train}, cache_train)
+        print(f'Train saved: {z_T_train.shape}')
+    else:
+        tr = torch.load(cache_train, weights_only=False)
+        z_T_train, tgt_ids_train, tgt_mask_train = tr['z_T'], tr['tgt_ids'], tr['tgt_mask']
+
+    if not cache_val.exists():
+        print('Extracting val...')
+        z_T_val, tgt_ids_val, tgt_mask_val = extract_s3_data(
+            s1_encoder, predictor, val_loader, DEVICE)
+        torch.save({'z_T': z_T_val, 'tgt_ids': tgt_ids_val,
+                    'tgt_mask': tgt_mask_val}, cache_val)
+        print(f'Val saved: {z_T_val.shape}')
+    else:
+        vl = torch.load(cache_val, weights_only=False)
+        z_T_val, tgt_ids_val, tgt_mask_val = vl['z_T'], vl['tgt_ids'], vl['tgt_mask']
 
 print(f'Train: {z_T_train.shape} | Val: {z_T_val.shape}')
+
 
 # ── Build datasets ────────────────────────────────────────────────────────────
 
