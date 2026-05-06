@@ -217,9 +217,9 @@ print(f'Train batches: {len(train_loader)} | Val batches: {len(val_loader)}')
 
 # REPLACE the entire extraction section with just this:
 
-cache_train    = SAVE_DIR / 's3_data_train.pt'
-cache_val      = SAVE_DIR / 's3_data_val.pt'
-best_ckpt_path = SAVE_DIR / 'best.pt'
+cache_train    = Path('/content/s3_data_train.pt')   # local, fast
+cache_val      = Path('/content/s3_data_val.pt')
+best_ckpt_path = SAVE_DIR / 'best.pt'                # decoder checkpoint still on Drive
 
 if cache_train.exists() and cache_val.exists():
     print('Loading cached S3 data...')
