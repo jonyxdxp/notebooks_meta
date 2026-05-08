@@ -27,9 +27,9 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 
 from config import cfg
-from data   import make_dataloaders
+from data.data   import make_dataloaders
 from losses   import InfoNCELoss, recall_at_k, mean_reciprocal_rank
-from model  import DialogNextTurnPredictor
+from cog_arch.dm  import DialogNextTurnPredictor
 
 
 # ── Reproducibility ─────────────────────────────────────────────────────────────
