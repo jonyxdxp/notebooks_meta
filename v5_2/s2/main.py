@@ -15,7 +15,10 @@ Usage (Colab / terminal):
   train(cfg)
 """
 
-import os
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import random
 import time
 from pathlib import Path
