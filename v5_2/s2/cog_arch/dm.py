@@ -280,8 +280,8 @@ class DialogNextTurnPredictor(nn.Module):
           history_ids:   (B, T, L)
           history_masks: (B, T, L)
           history_len:   (B,)
-          target_ids:    (B, L)
-          target_mask:   (B, L)
+          tgt_ids:       (B, L)
+          tgt_mask:      (B, L)
 
         returns:
           pred_emb   (B, D) — projected context vector
@@ -308,8 +308,8 @@ class DialogNextTurnPredictor(nn.Module):
 
         # 5. Encode target utterance: (B, L) → (B, D)
         target_emb = self.encoder(
-            batch["target_ids"],
-            batch["target_mask"],
+            batch["tgt_ids"],
+            batch["tgt_mask"],
         )
 
         return pred_emb, target_emb

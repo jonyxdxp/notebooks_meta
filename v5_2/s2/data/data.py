@@ -31,15 +31,30 @@ from transformers import AutoTokenizer
 
 def load_dialogues(data_dir: str, split: str) -> List[List[str]]:
     """
-    Try several common file formats for the given split (train/val/test).
+    Load dialogues for a given split from the DailyDialog processed directory.
+
+    Canonical layout (matches your existing dataset.py):
+      {data_dir}/train/dialogues_train.txt
+      {data_dir}/validation/dialogues_validation.txt
+      {data_dir}/test/dialogues_test.txt
+
+    Also tries several fallback paths for flexibility.
+    Each .txt file: one dialogue per line, turns separated by ' __eou__ '.
     Returns a list of dialogues; each dialogue is a list of utterance strings.
     """
     data_dir = Path(data_dir)
+
+    # 'val' is an alias for 'validation' (the actual folder/file name)
+    fs = "validation" if split == "val" else split
+
     candidates = [
-        data_dir / f"{split}.json",
-        data_dir / f"{split}.jsonl",
-        data_dir / f"{split}.txt",
-        data_dir / split / "dialogues.json",
+        # canonical: matches your existing dataset.py exactly
+        data_dir / fs / f"dialogues_{fs}.txt",
+        # flat fallbacks
+        data_dir / f"{fs}.txt",
+        data_dir / f"{fs}.json",
+        data_dir / f"{fs}.jsonl",
+        data_dir / fs / "dialogues.json",
     ]
 
     for path in candidates:
@@ -48,10 +63,23 @@ def load_dialogues(data_dir: str, split: str) -> List[List[str]]:
 
         suffix = path.suffix.lower()
 
+        if suffix == ".txt":
+            dialogues = []
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # DailyDialog __eou__ format: one dialogue per line
+                    parts = [p.strip() for p in line.split("__eou__") if p.strip()]
+                    if len(parts) >= 2:
+                        dialogues.append(parts)
+            print(f"[data] loaded {split} from {path}  ({len(dialogues)} dialogues)")
+            return dialogues
+
         if suffix == ".json":
             with open(path) as f:
                 data = json.load(f)
-            # handle both list-of-lists and list-of-dicts {"utterances": [...]}
             dialogues = []
             for item in data:
                 if isinstance(item, list):
@@ -60,6 +88,7 @@ def load_dialogues(data_dir: str, split: str) -> List[List[str]]:
                     key = next((k for k in ("utterances", "turns", "dialog", "dialogue") if k in item), None)
                     if key:
                         dialogues.append([str(u).strip() for u in item[key] if str(u).strip()])
+            print(f"[data] loaded {split} from {path}  ({len(dialogues)} dialogues)")
             return dialogues
 
         if suffix == ".jsonl":
@@ -76,34 +105,12 @@ def load_dialogues(data_dir: str, split: str) -> List[List[str]]:
                         key = next((k for k in ("utterances", "turns", "dialog", "dialogue") if k in item), None)
                         if key:
                             dialogues.append([str(u).strip() for u in item[key] if str(u).strip()])
-            return dialogues
-
-        if suffix == ".txt":
-            # DailyDialog style: utterances separated by " __eou__ " or newlines,
-            # dialogues separated by blank lines or one dialogue per line.
-            dialogues = []
-            current: List[str] = []
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        if current:
-                            dialogues.append(current)
-                            current = []
-                    elif " __eou__" in line:
-                        # DailyDialog raw: each line is a full dialogue
-                        parts = [p.strip() for p in line.split("__eou__") if p.strip()]
-                        if parts:
-                            dialogues.append(parts)
-                    else:
-                        current.append(line)
-            if current:
-                dialogues.append(current)
+            print(f"[data] loaded {split} from {path}  ({len(dialogues)} dialogues)")
             return dialogues
 
     raise FileNotFoundError(
-        f"Could not find a recognised data file for split='{split}' in {data_dir}.\n"
-        f"Tried: {[str(c) for c in candidates]}"
+        f"Could not find data for split='{split}' (looked for '{fs}') in {data_dir}.\n"
+        f"Tried:\n" + "\n".join(f"  {c}" for c in candidates)
     )
 
 
@@ -186,9 +193,9 @@ class DialogNextTurnDataset(Dataset):
             "history_ids":    torch.stack(history_ids),
             "history_masks":  torch.stack(history_masks),
             "history_len":    torch.tensor(history_len, dtype=torch.long),
-            # (seq_len,)
-            "target_ids":     target_enc["input_ids"].squeeze(0),
-            "target_mask":    target_enc["attention_mask"].squeeze(0),
+            # (seq_len,)  — named tgt_* to match your existing collator
+            "tgt_ids":        target_enc["input_ids"].squeeze(0),
+            "tgt_mask":       target_enc["attention_mask"].squeeze(0),
         }
 
 
@@ -215,9 +222,8 @@ def make_dataloaders(cfg) -> Tuple[DataLoader, DataLoader, DataLoader]:
         try:
             dialogues = load_dialogues(cfg.raw_data_dir, split)
         except FileNotFoundError as e:
-            # allow missing test split without crashing
-            if split == "test":
-                print(f"[data] test split not found, skipping. ({e})")
+            if split in ("val", "test"):
+                print(f"[data] {split} split not found, skipping. ({e})")
                 loaders[split] = None
                 continue
             raise
@@ -229,7 +235,8 @@ def make_dataloaders(cfg) -> Tuple[DataLoader, DataLoader, DataLoader]:
             min_turns   = cfg.min_turns,
             max_history = cfg.max_history,
         )
-        print(f"[data] {split:>5} — {len(dialogues):>6} dialogues → "
+        label = "validation" if split == "val" else split
+        print(f"[data] {label:>10} — {len(dialogues):>6} dialogues → "
               f"{len(dataset):>7} (history, target) windows")
 
         loaders[split] = DataLoader(
