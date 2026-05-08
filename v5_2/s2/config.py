@@ -9,7 +9,7 @@ from pathlib import Path
 @dataclass
 class Config:
     # ── Paths ──────────────────────────────────────────────────────────────────
-    raw_data_dir:   str = "/content/data/dailydialog_processed"
+    raw_data_dir:   str = "/content/data/dailydialog_raw/ijcnlp_dailydialog"
     cache_dir:      str = "/content/drive/MyDrive/data/cache"
     output_dir:     str = "/content/drive/MyDrive/checkpoints/dialog_next_turn"
 

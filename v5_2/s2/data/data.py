@@ -16,7 +16,6 @@ The loader creates all valid (history, target) windows from each dialogue:
   capped at cfg.max_history turns of history.
 """
 
-import json
 import os
 import random
 from pathlib import Path
@@ -31,87 +30,49 @@ from transformers import AutoTokenizer
 
 def load_dialogues(data_dir: str, split: str) -> List[List[str]]:
     """
-    Load dialogues for a given split from the DailyDialog processed directory.
+    Load DailyDialog splits from the extracted ijcnlp_dailydialog structure.
 
-    Canonical layout (matches your existing dataset.py):
-      {data_dir}/train/dialogues_train.txt
-      {data_dir}/validation/dialogues_validation.txt
-      {data_dir}/test/dialogues_test.txt
+    Expected layout (after unzipping train.zip / validation.zip / test.zip):
+      <data_dir>/
+        train/train/dialogues_train.txt
+        validation/validation/dialogues_validation.txt
+        test/test/dialogues_test.txt
 
-    Also tries several fallback paths for flexibility.
-    Each .txt file: one dialogue per line, turns separated by ' __eou__ '.
-    Returns a list of dialogues; each dialogue is a list of utterance strings.
+    Each .txt file has one dialogue per line; utterances are separated by
+    the token ' __eou__ ' (with trailing space after last utterance too).
     """
     data_dir = Path(data_dir)
 
-    # 'val' is an alias for 'validation' (the actual folder/file name)
-    fs = "validation" if split == "val" else split
+    # Exact relative paths for the ijcnlp_dailydialog double-nested structure
+    SPLIT_FILES = {
+        "train": data_dir / "train"      / "train"      / "dialogues_train.txt",
+        "val":   data_dir / "validation" / "validation" / "dialogues_validation.txt",
+        "test":  data_dir / "test"       / "test"       / "dialogues_test.txt",
+    }
 
-    candidates = [
-        # canonical: matches your existing dataset.py exactly
-        data_dir / fs / f"dialogues_{fs}.txt",
-        # flat fallbacks
-        data_dir / f"{fs}.txt",
-        data_dir / f"{fs}.json",
-        data_dir / f"{fs}.jsonl",
-        data_dir / fs / "dialogues.json",
-    ]
+    if split not in SPLIT_FILES:
+        raise ValueError(f"Unknown split '{split}'. Expected one of: {list(SPLIT_FILES)}")
 
-    for path in candidates:
-        if not path.exists():
-            continue
+    path = SPLIT_FILES[split]
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Could not find data file for split='{split}'.\n"
+            f"Expected: {path}\n"
+            f"Run the extraction cell first to unzip train.zip / validation.zip / test.zip."
+        )
 
-        suffix = path.suffix.lower()
+    dialogues = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            # Split on __eou__ and drop empty strings (trailing token produces one)
+            parts = [p.strip() for p in line.split("__eou__") if p.strip()]
+            if parts:
+                dialogues.append(parts)
 
-        if suffix == ".txt":
-            dialogues = []
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    # DailyDialog __eou__ format: one dialogue per line
-                    parts = [p.strip() for p in line.split("__eou__") if p.strip()]
-                    if len(parts) >= 2:
-                        dialogues.append(parts)
-            print(f"[data] loaded {split} from {path}  ({len(dialogues)} dialogues)")
-            return dialogues
-
-        if suffix == ".json":
-            with open(path) as f:
-                data = json.load(f)
-            dialogues = []
-            for item in data:
-                if isinstance(item, list):
-                    dialogues.append([str(u).strip() for u in item if str(u).strip()])
-                elif isinstance(item, dict):
-                    key = next((k for k in ("utterances", "turns", "dialog", "dialogue") if k in item), None)
-                    if key:
-                        dialogues.append([str(u).strip() for u in item[key] if str(u).strip()])
-            print(f"[data] loaded {split} from {path}  ({len(dialogues)} dialogues)")
-            return dialogues
-
-        if suffix == ".jsonl":
-            dialogues = []
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    item = json.loads(line)
-                    if isinstance(item, list):
-                        dialogues.append([str(u).strip() for u in item if str(u).strip()])
-                    elif isinstance(item, dict):
-                        key = next((k for k in ("utterances", "turns", "dialog", "dialogue") if k in item), None)
-                        if key:
-                            dialogues.append([str(u).strip() for u in item[key] if str(u).strip()])
-            print(f"[data] loaded {split} from {path}  ({len(dialogues)} dialogues)")
-            return dialogues
-
-    raise FileNotFoundError(
-        f"Could not find data for split='{split}' (looked for '{fs}') in {data_dir}.\n"
-        f"Tried:\n" + "\n".join(f"  {c}" for c in candidates)
-    )
+    return dialogues
 
 
 def build_windows(
@@ -193,9 +154,9 @@ class DialogNextTurnDataset(Dataset):
             "history_ids":    torch.stack(history_ids),
             "history_masks":  torch.stack(history_masks),
             "history_len":    torch.tensor(history_len, dtype=torch.long),
-            # (seq_len,)  — named tgt_* to match your existing collator
-            "tgt_ids":        target_enc["input_ids"].squeeze(0),
-            "tgt_mask":       target_enc["attention_mask"].squeeze(0),
+            # (seq_len,)
+            "target_ids":     target_enc["input_ids"].squeeze(0),
+            "target_mask":    target_enc["attention_mask"].squeeze(0),
         }
 
 
@@ -222,8 +183,9 @@ def make_dataloaders(cfg) -> Tuple[DataLoader, DataLoader, DataLoader]:
         try:
             dialogues = load_dialogues(cfg.raw_data_dir, split)
         except FileNotFoundError as e:
-            if split in ("val", "test"):
-                print(f"[data] {split} split not found, skipping. ({e})")
+            # allow missing test split without crashing
+            if split == "test":
+                print(f"[data] test split not found, skipping. ({e})")
                 loaders[split] = None
                 continue
             raise
@@ -235,8 +197,7 @@ def make_dataloaders(cfg) -> Tuple[DataLoader, DataLoader, DataLoader]:
             min_turns   = cfg.min_turns,
             max_history = cfg.max_history,
         )
-        label = "validation" if split == "val" else split
-        print(f"[data] {label:>10} — {len(dialogues):>6} dialogues → "
+        print(f"[data] {split:>5} — {len(dialogues):>6} dialogues → "
               f"{len(dataset):>7} (history, target) windows")
 
         loaders[split] = DataLoader(
