@@ -91,6 +91,24 @@ class UtteranceEncoder(nn.Module):
         return emb
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # ── 2. Causal Context Transformer ─────────────────────────────────────────────
 
 class CausalContextTransformer(nn.Module):
@@ -229,6 +247,17 @@ class ProjectionHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ── Full Model ─────────────────────────────────────────────────────────────────
