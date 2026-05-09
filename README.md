@@ -15,7 +15,7 @@ uv sync
 source .venv/bin/activate
 python main.py
 # Option 2: Run directly with uv
-uv run python main.py
+uv run python main.pyh
 ```
 If you need conda-specific packages, you can use **Conda + uv**
 
