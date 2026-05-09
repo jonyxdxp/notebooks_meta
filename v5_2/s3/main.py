@@ -34,7 +34,7 @@ from config import cfg
 
 # Import s2 modules
 sys.path.insert(0, cfg.s2_module_path)
-from s2.cog_arch.dm import DialogNextTurnPredictor
+from cog_arch.dm import DialogNextTurnPredictor
 from config import Config as S2Config
 
 # s3 modules
