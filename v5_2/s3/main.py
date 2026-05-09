@@ -26,18 +26,33 @@ from torch.optim.lr_scheduler import LambdaLR
 from transformers import GPT2Tokenizer
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-# Make both s3 (this file's dir) and s2 importable
+# s3 dir at position 0 so its cog_arch/ and data/ win over s2's
 _s3_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _s3_dir)
 
 from config import cfg
 
-# Import s2 modules
-sys.path.insert(0, cfg.s2_module_path)
-from cog_arch.dm import DialogNextTurnPredictor
-from config import Config as S2Config
+# s2 loaded via importlib so it never shadows s3's cog_arch/
+import importlib.util as _ilu
 
-# s3 modules
+def _load_from(module_name, file_path):
+    spec = _ilu.spec_from_file_location(module_name, file_path)
+    mod  = _ilu.module_from_spec(spec)
+    sys.modules[module_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+# s2 path at position 1 — after s3, so s3's packages still take priority
+_s2 = cfg.s2_module_path
+sys.path.insert(1, _s2)
+
+_dm_mod  = _load_from("s2_dm",     f"{_s2}/cog_arch/dm.py")
+_cfg_mod = _load_from("s2_config", f"{_s2}/config.py")
+
+DialogNextTurnPredictor = _dm_mod.DialogNextTurnPredictor
+S2Config                = _cfg_mod.Config
+
+# s3 modules — resolved from s3_dir (position 0)
 from data.data         import make_dataloaders
 from cog_arch.decoder  import S3Decoder
 from losses            import perplexity_from_loss, compute_generation_metrics
