@@ -35,6 +35,49 @@ from config import cfg
 # s2 loaded via importlib so it never shadows s3's cog_arch/
 import importlib.util as _ilu
 
+
+
+
+path = '/content/notebooks_meta/v5_2/s3/main.py'
+with open(path) as f:
+    src = f.read()
+
+helper = '''
+def ensure_data_extracted(cfg):
+    """Auto-extract DailyDialog zips if the txt files are missing (ephemeral /content/)."""
+    import zipfile
+    from pathlib import Path
+    base  = Path(cfg.raw_data_dir)
+    check = base / "train" / "train" / "dialogues_train.txt"
+    if check.exists():
+        return
+    print("[data] txt files missing — extracting from Drive zips...")
+    # outer zip
+    outer = Path(cfg.cache_dir).parent / "raw" / "ijcnlp_dailydialog" / "ijcnlp_dailydialog.zip"
+    base.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(outer) as z:
+        z.extractall(base.parent)
+    # inner zips
+    for split in ["train", "validation", "test"]:
+        with zipfile.ZipFile(base / f"{split}.zip") as z:
+            z.extractall(base / split)
+    print("[data] extraction done")
+
+'''
+
+# insert the helper just before the train() function definition
+src = src.replace('def train(cfg=cfg):', helper + 'def train(cfg=cfg):')
+
+# call it as first line inside train()
+src = src.replace(
+    'def train(cfg=cfg):\n    set_seed(cfg.seed)',
+    'def train(cfg=cfg):\n    ensure_data_extracted(cfg)\n    set_seed(cfg.seed)'
+)
+
+with open(path, 'w') as f:
+    f.write(src)
+print("patched ✓")
+
 def _load_from(module_name, file_path):
     spec = _ilu.spec_from_file_location(module_name, file_path)
     mod  = _ilu.module_from_spec(spec)
