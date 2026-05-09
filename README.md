@@ -11,7 +11,7 @@ We use [uv](https://docs.astral.sh/uv/guides/projects/) for package management.
 ```bash
 # Install dependencies
 uv sync
-# Option 1: Activate virtual environment
+# Option 1: Activate virtual environhhhment
 source .venv/bin/activate
 python main.py
 # Option 2: Run directly with uv
