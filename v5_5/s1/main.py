@@ -245,12 +245,12 @@ def main(**kwargs):
     model.register_subword_params()
 
     checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        dirpath='/content/checkpoints',
-        filename='convert-{epoch:02d}-{val_loss:.2f}',
-        monitor='val_loss',
-        save_top_k=3,
-        mode='min',
-        every_n_epochs=1,
+    dirpath='/content/checkpoints',
+    filename='convert-{epoch:02d}-{train_loss:.2f}',
+    monitor='train_loss',   # ← change this
+    save_top_k=3,
+    mode='min',
+    every_n_epochs=1,
     )
 
     trainer = pl.Trainer.from_argparse_args(
@@ -258,7 +258,8 @@ def main(**kwargs):
     callbacks=[lr_decay, checkpoint_callback],
     accelerator='gpu',
     devices=1,
-    max_epochs=20,  # ← set directly, adjust as needed
+    max_epochs=20,
+    log_every_n_steps=1,   # ← add this
     **kwargs
     )
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=train_loader)
