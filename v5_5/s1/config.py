@@ -31,8 +31,8 @@ class ConveRTModelConfig(NamedTuple):
 class ConveRTTrainConfig(NamedTuple):
 
     sp_model_path: str = os.path.join(dirname, "/content/drive/MyDrive/data/cache/en.wiki.bpe.vs25000.model")
-    dataset_path: str = os.path.join(dirname, "/content/drive/MyDrive/data/cache/sample-dataset.json")
-    test_dataset_path: str = "/content/drive/MyDrive/data/cache/sample-dataset.json"
+    dataset_path: str = os.path.join(dirname, "/content/drive/MyDrive/data/cache/dailydialog.jsonl")
+    test_dataset_path: str = "/content/drive/MyDrive/data/cache/dailydialog.jsonl"
 
     model_save_dir: str = "lightning_logs/checkpoints/"
     log_dir: str = "lightning_logs"
