@@ -18,7 +18,7 @@
 
 
 import sys
-sys.path.insert(0, '/content/notebooks_meta/v5_5')
+sys.path.insert(0, '/content/notebooks_meta/v5_5/s1')
 
 import logging
 import random
