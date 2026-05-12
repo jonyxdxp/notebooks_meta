@@ -7,6 +7,8 @@
 
 
 
+import sys
+sys.path.insert(0, '/content/notebooks_meta/v5_5')
 
 import os
 from typing import NamedTuple
