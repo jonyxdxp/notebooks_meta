@@ -242,11 +242,25 @@ def main(**kwargs):
     lr_decay = LearningRateDecayCallback(train_config)
     model.register_subword_params()
 
-    trainer = (
-        pl.Trainer.from_argparse_args(args, callbacks = [lr_decay],**kwargs)
-    )  # ,checkpoint_callback = checkpoint_callback)  # ,resume_from_checkpoint=)
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+        dirpath='/content/checkpoints',
+        filename='convert-{epoch:02d}-{val_loss:.2f}',
+        monitor='val_loss',
+        save_top_k=3,
+        mode='min',
+        every_n_epochs=1,
+    )
+
+    trainer = pl.Trainer.from_argparse_args(
+        args,
+        callbacks=[lr_decay, checkpoint_callback],
+        accelerator='gpu',
+        devices=1,
+        max_epochs=train_config.final_batch,  # or a fixed int like max_epochs=10
+        **kwargs
+    )
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=train_loader)
 
 
 if __name__ == "__main__":
-    main(fast_dev_run=True)
+    main()
