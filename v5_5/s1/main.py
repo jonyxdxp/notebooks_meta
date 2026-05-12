@@ -245,7 +245,7 @@ def main(**kwargs):
     trainer = (
         pl.Trainer.from_argparse_args(args, callbacks = [lr_decay],**kwargs)
     )  # ,checkpoint_callback = checkpoint_callback)  # ,resume_from_checkpoint=)
-    trainer.fit(model, train_dataloader = train_loader, val_dataloaders = train_loader)
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=train_loader)
 
 
 if __name__ == "__main__":
