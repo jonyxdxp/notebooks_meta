@@ -38,7 +38,7 @@ from cog_arch.encoder import FeedForward2, TransformerLayers
 
 import argparse
 from sentencepiece import SentencePieceProcessor
-from s1.data.dataset import DataModule, RedditData, load_instances_from_reddit_json
+from data.dataset import DataModule, RedditData, load_instances_from_reddit_json
 
 
 logger = logging.getLogger(__name__)
