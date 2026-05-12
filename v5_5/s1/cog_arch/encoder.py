@@ -21,8 +21,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.modules.normalization import LayerNorm
 
-from src.config import ConveRTModelConfig
-from src.dataset import EncoderInputFeature
+from config import ConveRTModelConfig
+from data.dataset import EncoderInputFeature
 
 
 
