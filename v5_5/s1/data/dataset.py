@@ -21,7 +21,7 @@ import torch
 from sentencepiece import SentencePieceProcessor
 from torch.nn.functional import pad
 from torch.utils.data import DataLoader
-from src.config import ConveRTTrainConfig
+from config import ConveRTTrainConfig
 
 
 config = ConveRTTrainConfig()
