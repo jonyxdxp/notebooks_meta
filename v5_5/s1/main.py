@@ -85,8 +85,8 @@ class SingleContextConvert(pl.LightningModule):
 
         self.weight_decay = train_config.l2_weight_decay
 
-        self.hparams = self.train_config._field_defaults
-        self.hparams.update(self.model_config._field_defaults)
+        # ✅ New — store under a different name
+        self._hparams_store = {**self.train_config._field_defaults, **self.model_config._field_defaults}
         self.subword_params = None
 
         logger.info(
@@ -98,9 +98,7 @@ class SingleContextConvert(pl.LightningModule):
     def forward(self, x):
         return self.transformer_layers(x)
 
-    def backward(self, trainer, loss, optimizer, optimizer_idx):
-        """override hook of lightning as want specific grad norm clip of only subword embedding parameters, after loss.backward()
-        but before optimizer step"""
+    def backward(self, loss, optimizer, optimizer_idx):
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.subword_params, self.train_config.grad_norm_clip)
 
@@ -122,12 +120,10 @@ class SingleContextConvert(pl.LightningModule):
             p for n, p in self.named_parameters() if any(nd in n for nd in no_decay)
         ]
         optim_groups = [
-            {"params": params_decay, "weight_decay": self.hparams.l2_weight_decay},
+            {"params": params_decay, "weight_decay": self._hparams_store['l2_weight_decay']},
             {"params": params_nodecay, "weight_decay": 0.0},
         ]
-        optimizer = torch.optim.AdamW(
-            optim_groups, lr = self.hparams.learning_rate
-        )
+        optimizer = torch.optim.AdamW(optim_groups, lr=self._hparams_store['learning_rate'])
         return optimizer
 
     def training_step(self, batch, batch_idx):
@@ -223,16 +219,11 @@ class LearningRateDecayCallback(pl.Callback):
 
 
 def _parse_args():
-    """Parse command-line arguments."""
-
     parser = argparse.ArgumentParser()
-    #parser.add_argument("--gpus", type = int, default = 1)
-    #parser.add_argument("--precision", type = int, default = 16)
-    parser.add_argument("--progress_bar_refresh_rate", type = int, default = 1)
-    parser.add_argument("--row_log_interval", type = int, default = 1)
+    parser.add_argument("--progress_bar_refresh_rate", type=int, default=1)
+    parser.add_argument("--row_log_interval", type=int, default=1)
 
-    args = parser.parse_args()
-
+    args = parser.parse_args([])  # ← empty list, ignore sys.argv
     return args
 
 
