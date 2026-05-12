@@ -30,10 +30,10 @@ import torch
 import math
 
 
-from s1.config import ConveRTModelConfig, ConveRTTrainConfig
-from s1.losses import LossFunction
+from config import ConveRTModelConfig, ConveRTTrainConfig
+from losses import LossFunction
 
-from s1.cog_arch.encoder import FeedForward2, TransformerLayers
+from cog_arch.encoder import FeedForward2, TransformerLayers
 
 import argparse
 from sentencepiece import SentencePieceProcessor
