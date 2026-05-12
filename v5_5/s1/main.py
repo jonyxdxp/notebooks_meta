@@ -135,6 +135,8 @@ class SingleContextConvert(pl.LightningModule):
         hy = self.ff2_reply(ry, batch_reply.attention_mask)
 
         loss = self.loss_function(hx, hy)
+        self.log('train_loss', loss, prog_bar=True)  # ← add this
+
 
         tqdm_dict = {"train_loss": loss}
         output = OrderedDict(
@@ -144,10 +146,10 @@ class SingleContextConvert(pl.LightningModule):
         # result.log("train_loss", loss)
         return output
 
-    def validation_step(self, batch, batch_idx):
-        output = self.training_step(batch, batch_idx)
-        val_output = {"val_loss": output["loss"]}
-        return val_output
+def validation_step(self, batch, batch_idx):
+    output = self.training_step(batch, batch_idx)
+    self.log('val_loss', output["loss"], prog_bar=True, on_epoch=True)  # ← add this
+    return {"val_loss": output["loss"]}
     
 
 
