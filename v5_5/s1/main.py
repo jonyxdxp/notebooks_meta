@@ -252,12 +252,12 @@ def main(**kwargs):
     )
 
     trainer = pl.Trainer.from_argparse_args(
-        args,
-        callbacks=[lr_decay, checkpoint_callback],
-        accelerator='gpu',
-        devices=1,
-        max_epochs=train_config.final_batch,  # or a fixed int like max_epochs=10
-        **kwargs
+    args,
+    callbacks=[lr_decay, checkpoint_callback],
+    accelerator='gpu',
+    devices=1,
+    max_epochs=20,  # ← set directly, adjust as needed
+    **kwargs
     )
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=train_loader)
 
