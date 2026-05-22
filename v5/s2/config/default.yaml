@@ -1,0 +1,76 @@
+# from https://github.com/facebookresearch/eb_jepa/blob/main/examples/ac_video_jepa/cfgs/planning_mppi.yaml
+
+
+
+
+
+
+# Configuración JEPA Stage 2 (Predictor Training)
+# Compatible con: código Transformer + VICReg/VC Loss
+
+meta:
+  seed: 2025
+  device: auto          # auto, cuda, or cpu
+
+data:
+  cache_dir:          '/content/drive/MyDrive/data/cache'
+  raw_data_dir:       '/content/data/dailydialog_processed'
+  batch_size:         64
+  eval_batch:         64
+  num_workers:        0
+  max_seq_len:        128
+  num_target_spans:   4
+  target_span_length: 8
+
+model:
+  vocab_size:       30522
+  hidden_size:      256
+  num_heads:        4
+  num_layers:       4
+  max_seq_len:      128
+  max_turns:        6        # ← add this (5 context + 1 target)
+  pred_hidden_size: 256
+  pred_num_heads:   4
+  pred_num_layers:  2
+  dstc:             256
+  # pred_num_frames removed — DM now uses max_turns and max_seq_len
+
+    
+  
+  
+  # S2 shouldn't use VC loss at all, lets use MSE
+
+loss:
+  std_coeff: 0.0    # Disable VC loss
+  cov_coeff: 0.0
+
+optim:
+  epochs: 40        # Train longer (was 20)
+  lr: 0.0001
+  weight_decay: 0.01  # Reduce from 0.05
+
+training:
+  use_amp: true         # Mixed precision
+  dtype: float16
+  s1_ckpt: "/content/drive/MyDrive/metanet/v5/s1/checkpoints/epoch_best.pt"  # Ruta real
+  ema_decay: 0.996      # AÑADIDO: Decay para Exponential Moving Average (0.9-0.999)
+
+logging:
+  log_wandb: true
+  wandb_group: 
+  log_every: 1          # Validar/loggear cada N épocas
+  save_every: 10        # Guardar checkpoint cada N épocas
+  tqdm_silent: false
+  exp_dir: "/content/drive/MyDrive/metanet/v5/s2/checkpoints"  # AÑADIDO: Directorio para guardar checkpoints
+
+# --- Parámetros para búsqueda de hiperparámetros (sweep) ---
+sweep:
+  param_grid:
+    data.batch_size: [32, 64]
+    optim.lr: [0.001, 0.0001, 0.0005]
+    loss.std_coeff: [1, 10, 100, 200]
+    loss.cov_coeff: [1, 10, 100, 200]
+    meta.seed: [1, 1000, 10000]
+
+
+

@@ -1,0 +1,45 @@
+
+# from https://github.com/facebookresearch/eb_jepa/blob/main/examples/video_jepa/cfgs/default.yaml
+
+
+
+
+
+# Configuración Stage 1: Entrenamiento de Encoders (Texto JEPA)
+# NOTA: Adaptado de Video MNIST a Transformer para texto
+
+# Meta
+seed: 2025
+device: auto
+
+# Modelo Transformer (acceso directo requerido por el código)
+hidden_size: 256
+num_heads: 4
+num_layers: 4
+max_seq_len: 128
+mlp_ratio: 4.0
+vocab_size: 30522
+
+# JEPA Masking (requerido por dataloader)
+num_target_spans: 4
+target_span_length: 8
+
+# Training (acceso directo requerido)
+batch_size: 64
+eval_batch: 128
+num_workers: 0
+lr: 0.0001
+weight_decay: 0.05
+n_epochs: 20
+ema_decay: 0.996
+
+# Loss (VICReg/BCS)
+std_coeff: 50.0
+cov_coeff: 1.0
+lmbd: 10.0  # Para BCS loss
+
+# Paths (requeridos por dataset y checkpoints)
+cache_dir: '/content/drive/MyDrive/data/cache'
+ckpt_dir: '/content/drive/MyDrive/metanet/v5/s1/checkpoints'
+raw_data_dir: '/content/data/dailydialog_processed'
+tokenizer_name: 'bert-base-uncased'
