@@ -1,6 +1,4 @@
-# ── Create v6/s2/config.py ────────────────────────────────────────────────────
 
-config_code = '''
 import torch
 import os
 
@@ -8,7 +6,7 @@ import os
 BASE        = os.environ.get("DAILYDIALOG_PATH",
               "./data/dailydialog")
 CKPT_DIR    = os.environ.get("CKPT_DIR",
-              "./checkpoints")
+              "./data/dmi_checkpoints")
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 MAX_TURNS   = 6
@@ -30,11 +28,5 @@ DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ── DMI encoder ───────────────────────────────────────────────────────────────
 DMI_CKPT    = os.environ.get("DMI_CKPT",
-              "./checkpoints/DMI_medium_model.pth")
+              "./data/dmi_checkpoints/DMI_medium_model.pth")
 BERT_NAME   = "google/bert_uncased_L-8_H-768_A-12"
-'''
-
-os.makedirs('v6/s2', exist_ok=True)
-with open('v6/s2/config.py', 'w') as f:
-    f.write(config_code)
-print("config.py written")
