@@ -1,1 +1,1 @@
-from .core import SMI, WrappedSMI
+from cog_arch import SMI, WrappedSMI
