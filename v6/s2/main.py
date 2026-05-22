@@ -1,3 +1,25 @@
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import random
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch.cuda.amp import GradScaler, autocast
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
+
+from config import cfg
+from data.data   import make_dataloaders
+from losses   import InfoNCELoss, recall_at_k, mean_reciprocal_rank
+
+from cog_arch.dm  import DialogueJEPAPredictor
+
+
+
 # ── Cell 3: Training ──────────────────────────────────────────────────────────
 
 optimizer = optim.AdamW(predictor.parameters(), lr=1e-4, weight_decay=1e-4)
