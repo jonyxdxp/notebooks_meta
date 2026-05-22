@@ -145,3 +145,143 @@ class CovarianceLoss(torch.nn.Module):
 
 
 
+
+
+
+
+
+
+# --------------------------------------------------------
+
+
+
+
+
+
+
+"""
+loss.py — InfoNCE (NT-Xent) contrastive loss and Recall@K evaluation.
+
+InfoNCE intuition for our task:
+  - Each sample in a batch has a predicted context embedding (pred) and a
+    true next-utterance embedding (target).
+  - The diagonal of the similarity matrix = correct pairs (positives).
+  - All off-diagonal entries = in-batch negatives.
+  - The model is trained to make each pred closest to its own target.
+
+Recall@K measures: for each context in a candidate pool, is the true
+  next utterance in the model's top-K retrieved candidates?
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ── InfoNCE Loss ───────────────────────────────────────────────────────────────
+
+class InfoNCELoss(nn.Module):
+    """
+    Symmetric InfoNCE (NT-Xent) loss over in-batch negatives.
+
+    Given:
+      pred   (B, D) — projected context vectors        (anchors)
+      target (B, D) — DSE embeddings of true next turn (positives)
+
+    Computes bidirectional cross-entropy:
+      L = 0.5 * [ CE(sim(pred, target), diag) + CE(sim(target, pred), diag) ]
+
+    Using both directions stabilises training and is standard in SimCSE / CLIP.
+    """
+
+    def __init__(self, temperature: float = 0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self,
+                pred:   torch.Tensor,
+                target: torch.Tensor) -> torch.Tensor:
+        """
+        pred:   (B, D)
+        target: (B, D)
+        returns: scalar loss
+        """
+        B = pred.size(0)
+
+        # L2-normalise so cosine similarity = dot product
+        pred_n   = F.normalize(pred,   dim=-1)   # (B, D)
+        target_n = F.normalize(target, dim=-1)   # (B, D)
+
+        # similarity matrix (B, B)
+        sim = torch.matmul(pred_n, target_n.T) / self.temperature
+
+        # labels: diagonal indices are the positives
+        labels = torch.arange(B, device=pred.device)
+
+        # bidirectional cross-entropy
+        loss_p2t = F.cross_entropy(sim,   labels)   # pred   → target direction
+        loss_t2p = F.cross_entropy(sim.T, labels)   # target → pred   direction
+
+        return 0.5 * (loss_p2t + loss_t2p)
+
+
+# ── Recall@K Metric ────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def recall_at_k(
+    pred_embs:   torch.Tensor,
+    target_embs: torch.Tensor,
+    ks: tuple = (1, 5, 10),
+) -> dict:
+    """
+    Given a pool of predictions and a pool of candidate targets, compute
+    Recall@K: the fraction of queries for which the true target is in
+    the top-K retrieved items.
+
+    pred_embs:   (N, D) — context predictions (one per conversation window)
+    target_embs: (N, D) — corresponding true next utterances
+    ks:          tuple of K values to evaluate
+
+    This evaluates retrieval in the full pool (N candidates), not just a batch,
+    so it should be called after accumulating embeddings over the whole eval set.
+    """
+    pred_n   = F.normalize(pred_embs,   dim=-1)
+    target_n = F.normalize(target_embs, dim=-1)
+
+    # (N, N) similarity; entry [i, j] = similarity of pred_i to target_j
+    sim = torch.matmul(pred_n, target_n.T)          # (N, N)
+
+    results = {}
+    for k in ks:
+        # for each query i, check if target i is in the top-k columns
+        top_k_indices = sim.topk(k, dim=-1).indices  # (N, k)
+        ground_truth  = torch.arange(sim.size(0), device=sim.device).unsqueeze(1)
+        correct = (top_k_indices == ground_truth).any(dim=-1).float()
+        results[f"R@{k}"] = correct.mean().item()
+
+    return results
+
+
+# ── Mean Reciprocal Rank ───────────────────────────────────────────────────────
+
+@torch.no_grad()
+def mean_reciprocal_rank(
+    pred_embs:   torch.Tensor,
+    target_embs: torch.Tensor,
+) -> float:
+    """
+    MRR over the full pool. Useful as a single summary metric.
+    """
+    pred_n   = F.normalize(pred_embs,   dim=-1)
+    target_n = F.normalize(target_embs, dim=-1)
+
+    sim  = torch.matmul(pred_n, target_n.T)          # (N, N)
+    N    = sim.size(0)
+
+    # rank of the correct item for each query (1-indexed)
+    sorted_idx = sim.argsort(dim=-1, descending=True)                   # (N, N)
+    gt         = torch.arange(N, device=sim.device).unsqueeze(1)        # (N, 1)
+    ranks      = (sorted_idx == gt).nonzero(as_tuple=False)[:, 1] + 1  # (N,)
+
+    mrr = (1.0 / ranks.float()).mean().item()
+    return mrr

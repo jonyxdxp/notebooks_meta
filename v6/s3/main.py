@@ -1,365 +1,321 @@
-#!/usr/bin/env python3
 """
-Stage 3: Cross-attention Decoder Training
-Trains S3 decoder to generate turn_{t+1} text from Z_T_real.
-At inference, Z_T_real is swapped for z_fused from PoE.
-S1 and S2 stay completely frozen.
+main.py — s3 training: GPT-2 prefix decoder on top of frozen s2.
+
+Pipeline per batch:
+  1. Forward frozen s2  →  predicted embedding ẑ  (B, 768)
+  2. Forward S3Decoder  →  CE loss over target tokens
+  3. Backprop only through S3Decoder (prefix_proj + GPT-2)
+
+Eval every cfg.eval_every epochs:
+  - Perplexity on val set
+  - BLEU-1/2/4 and Distinct-1/2 on generated samples
+  - Print a few example (history → generated) pairs
 """
 
-import sys
 import os
-import copy
-import importlib.util
+import sys
+import random
+import time
 from pathlib import Path
 
+import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import LambdaLR
+from transformers import GPT2Tokenizer
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT     = '/content/notebooks_meta'
-S1       = f'{ROOT}/v5/s1'
-S2       = f'{ROOT}/v5/s2'
-S3       = f'{ROOT}/v5/s3'
-DEVICE   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-SAVE_DIR = Path('/content/drive/MyDrive/metanet/v5/s3/checkpoints')
-SAVE_DIR.mkdir(parents=True, exist_ok=True)
+# ── Path setup ────────────────────────────────────────────────────────────────
+# s3 dir at position 0 so its cog_arch/ and data/ win over s2's
+_s3_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _s3_dir)
 
-sys.path.insert(0, ROOT)
+from config import cfg
 
-from v5.s1.cog_arch.encoder import Encoder
-from v5.s3.cog_arch.decoder import Decoder
-from v5.s2.config import CFG
+# s2 loaded via importlib so it never shadows s3's cog_arch/
+import importlib.util as _ilu
 
-def _load_module(name, filepath):
-    spec = importlib.util.spec_from_file_location(name, filepath)
-    mod  = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
+def _load_from(module_name, file_path):
+    spec = _ilu.spec_from_file_location(module_name, file_path)
+    mod  = _ilu.module_from_spec(spec)
+    sys.modules[module_name] = mod
     spec.loader.exec_module(mod)
     return mod
 
-_dataset    = _load_module('data.dataset',    f'{S2}/data/dataset.py')
-_dataloader = _load_module('data.dataloader', f'{S2}/data/dataloader.py')
-
-get_stage2_dataloaders = _dataloader.get_stage2_dataloaders
-tokenizer              = _dataset.tokenizer
-
-print(f'Device: {DEVICE}')
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def mean_pool(hidden, mask):
-    mask_f = mask.unsqueeze(-1).float()
-    return (hidden * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
-
-# ── Dataset ───────────────────────────────────────────────────────────────────
-
-class S3Dataset(Dataset):
-    """
-    Each item:
-      z_T_real  : (D,)   — S1 encoding of turn_{t+1}  (oracle conditioning)
-      tgt_ids   : (L,)   — token ids of turn_{t+1}    (generation target)
-      tgt_mask  : (L,)   — attention mask of turn_{t+1}
-    """
-    def __init__(self, z_T, tgt_ids, tgt_mask):
-        assert z_T.size(0) == tgt_ids.size(0)
-        self.z_T      = z_T
-        self.tgt_ids  = tgt_ids
-        self.tgt_mask = tgt_mask
-
-    def __len__(self):
-        return self.z_T.size(0)
-
-    def __getitem__(self, idx):
-        return {
-            'z_T':      self.z_T[idx],
-            'tgt_ids':  self.tgt_ids[idx],
-            'tgt_mask': self.tgt_mask[idx],
-        }
-
-# ── Extract Z_T_real and collect target token ids ─────────────────────────────
-
-def extract_s3_data(s1_encoder, loader, device):
-    """
-    Extract:
-      z_T_real  : mean_pool(S1(turn_{t+1}))   (B, D)
-      tgt_ids   : token ids of turn_{t+1}      (B, L)
-      tgt_mask  : attention mask of turn_{t+1} (B, L)
-    """
-    all_z_T, all_tgt_ids, all_tgt_mask = [], [], []
-
-    with torch.no_grad():
-        for batch in tqdm(loader, desc='Extracting S3 data'):
-            tgt_ids  = batch['input_ids_b'].to(device)
-            tgt_mask = batch['attention_mask_b'].to(device)
-
-            # Z_T_real — oracle conditioning signal
-            tgt_h = s1_encoder(tgt_ids, attention_mask=tgt_mask)
-            if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
-            z_T   = mean_pool(tgt_h, tgt_mask)      # (B, D)
-
-            all_z_T.append(z_T.cpu())
-            all_tgt_ids.append(tgt_ids.cpu())
-            all_tgt_mask.append(tgt_mask.cpu())
-
-    return (
-        torch.cat(all_z_T),       # (N, D)
-        torch.cat(all_tgt_ids),   # (N, L)
-        torch.cat(all_tgt_mask),  # (N, L)
-    )
-
-# ── Loss ──────────────────────────────────────────────────────────────────────
-
-def lm_loss(logits, tgt_ids, tgt_mask):
-    """
-    Standard language modeling loss with teacher forcing.
-
-    logits   : (B, T, vocab_size)
-    tgt_ids  : (B, T)
-    tgt_mask : (B, T) — ignore padding positions
-
-    Shift: predict token[i+1] from token[i]
-    Input  tokens: [CLS] t1 t2 t3 [SEP] [PAD]
-    Target tokens: t1    t2 t3 [SEP] [PAD] [PAD]
-    """
-    # Shift
-    shift_logits = logits[:, :-1, :].contiguous()   # (B, T-1, V)
-    shift_labels = tgt_ids[:, 1:].contiguous()       # (B, T-1)
-    shift_mask   = tgt_mask[:, 1:].contiguous()      # (B, T-1)
-
-    # Flatten
-    loss = F.cross_entropy(
-        shift_logits.view(-1, shift_logits.size(-1)),
-        shift_labels.view(-1),
-        reduction='none',
-    )
-
-    # Mask padding
-    loss = (loss * shift_mask.view(-1).float()).sum()
-    loss = loss / shift_mask.sum().clamp(min=1)
-
-    return loss
-
-# ── Load S1 encoder (frozen) ──────────────────────────────────────────────────
-
-s1_encoder = Encoder(
-    vocab_size  = CFG.model.vocab_size,
-    hidden_size = CFG.model.hidden_size,
-    num_heads   = CFG.model.num_heads,
-    num_layers  = CFG.model.num_layers,
-    max_seq_len = CFG.model.max_seq_len,
-).to(DEVICE)
-
-s1_ckpt = torch.load(CFG.training.s1_ckpt, map_location=DEVICE, weights_only=False)
-s1_encoder.load_state_dict(s1_ckpt['context_encoder'])
-s1_encoder.eval()
-for p in s1_encoder.parameters():
-    p.requires_grad = False
-print('S1 encoder loaded and frozen.')
-
-# ── Dataloaders ───────────────────────────────────────────────────────────────
-
-train_loader, val_loader = get_stage2_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
-print(f'Train batches: {len(train_loader)} | Val batches: {len(val_loader)}')
-
-# ── Extract and cache S3 data ─────────────────────────────────────────────────
-
-cache_train = SAVE_DIR / 's3_data_train.pt'
-cache_val   = SAVE_DIR / 's3_data_val.pt'
-
-if cache_train.exists():
-    print('Loading cached S3 data...')
-    tr = torch.load(cache_train, weights_only=False)
-    vl = torch.load(cache_val,   weights_only=False)
-    z_T_train, tgt_ids_train, tgt_mask_train = tr['z_T'], tr['tgt_ids'], tr['tgt_mask']
-    z_T_val,   tgt_ids_val,   tgt_mask_val   = vl['z_T'], vl['tgt_ids'], vl['tgt_mask']
-else:
-    print('Extracting S3 data (one time)...')
-    z_T_train, tgt_ids_train, tgt_mask_train = extract_s3_data(
-        s1_encoder, train_loader, DEVICE)
-    z_T_val, tgt_ids_val, tgt_mask_val = extract_s3_data(
-        s1_encoder, val_loader, DEVICE)
-    torch.save({'z_T': z_T_train, 'tgt_ids': tgt_ids_train,
-                'tgt_mask': tgt_mask_train}, cache_train)
-    torch.save({'z_T': z_T_val,   'tgt_ids': tgt_ids_val,
-                'tgt_mask': tgt_mask_val},   cache_val)
-
-print(f'Train: {z_T_train.shape} | Val: {z_T_val.shape}')
-
-# ── Build datasets ────────────────────────────────────────────────────────────
-
-train_ds = S3Dataset(z_T_train, tgt_ids_train, tgt_mask_train)
-val_ds   = S3Dataset(z_T_val,   tgt_ids_val,   tgt_mask_val)
-
-s3_train_loader = DataLoader(train_ds, batch_size=64, shuffle=True,  num_workers=0)
-s3_val_loader   = DataLoader(val_ds,   batch_size=64, shuffle=False, num_workers=0)
-
-# ── Decoder ───────────────────────────────────────────────────────────────────
-
-decoder = Decoder(
-    vocab_size        = CFG.model.vocab_size,   # 30522
-    hidden_size       = 256,
-    num_heads         = 4,
-    num_layers        = 4,
-    max_seq_len       = CFG.model.max_seq_len,  # 128
-    context_dim       = CFG.model.hidden_size,  # 256 — must match S1
-).to(DEVICE)
-
-total_params = sum(p.numel() for p in decoder.parameters())
-print(f'Decoder params: {total_params:,}')
-
-# ── Optimizer ─────────────────────────────────────────────────────────────────
-
-optimizer = AdamW(decoder.parameters(), lr=1e-4, weight_decay=0.05)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=20, eta_min=1e-5
-)
-
-# ── Training loop ─────────────────────────────────────────────────────────────
-
-history = {
-    'train_loss': [], 'train_ppl': [],
-    'val_loss':   [], 'val_ppl':   [],
-}
-best_val_loss = float('inf')
-N_EPOCHS      = 20
-
-print(f'\n{"="*60}')
-print(f'  S3 Decoder — {N_EPOCHS} epochs   device={DEVICE}')
-print(f'{"="*60}\n')
-
-for epoch in range(1, N_EPOCHS + 1):
-
-    # ── Train ────────────────────────────────────────────────────────────────
-    decoder.train()
-    t_loss = 0.0; n = 0
-
-    for batch in tqdm(s3_train_loader, desc=f'Epoch {epoch:02d}', leave=False):
-        z_T      = batch['z_T'].to(DEVICE)        # (B, D) — oracle conditioning
-        tgt_ids  = batch['tgt_ids'].to(DEVICE)    # (B, L)
-        tgt_mask = batch['tgt_mask'].to(DEVICE)   # (B, L)
-
-        # Forward: decoder generates turn_{t+1} conditioned on Z_T_real
-        logits = decoder(tgt_ids, z_T, tgt_mask)  # (B, L, vocab)
-
-        loss = lm_loss(logits, tgt_ids, tgt_mask)
-
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(decoder.parameters(), 1.0)
-        optimizer.step()
-
-        t_loss += loss.item(); n += 1
-
-    scheduler.step()
-
-    # ── Val ──────────────────────────────────────────────────────────────────
-    decoder.eval()
-    v_loss = 0.0; m = 0
-
-    with torch.no_grad():
-        for batch in s3_val_loader:
-            z_T      = batch['z_T'].to(DEVICE)
-            tgt_ids  = batch['tgt_ids'].to(DEVICE)
-            tgt_mask = batch['tgt_mask'].to(DEVICE)
-
-            logits = decoder(tgt_ids, z_T, tgt_mask)
-            loss   = lm_loss(logits, tgt_ids, tgt_mask)
-            v_loss += loss.item(); m += 1
-
-    train_loss = t_loss / n
-    val_loss   = v_loss / m
-    train_ppl  = torch.exp(torch.tensor(train_loss)).item()
-    val_ppl    = torch.exp(torch.tensor(val_loss)).item()
-
-    history['train_loss'].append(train_loss)
-    history['val_loss'].append(val_loss)
-    history['train_ppl'].append(train_ppl)
-    history['val_ppl'].append(val_ppl)
-
-    print(
-        f'Epoch {epoch:02d}/{N_EPOCHS}  '
-        f'train_loss={train_loss:.4f}  train_ppl={train_ppl:.1f}  '
-        f'val_loss={val_loss:.4f}  val_ppl={val_ppl:.1f}  '
-        f'lr={optimizer.param_groups[0]["lr"]:.2e}'
-    )
-
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        torch.save({
-            'epoch':      epoch,
-            'decoder':    decoder.state_dict(),
-            'optimizer':  optimizer.state_dict(),
-            'scheduler':  scheduler.state_dict(),
-            'val_loss':   best_val_loss,
-            'val_ppl':    val_ppl,
-            'config': {
-                'vocab_size':   CFG.model.vocab_size,
-                'hidden_size':  256,
-                'num_heads':    4,
-                'num_layers':   4,
-                'max_seq_len':  CFG.model.max_seq_len,
-                'context_dim':  CFG.model.hidden_size,
-            }
-        }, SAVE_DIR / 'best.pt')
-        print(f'  ✓ saved → {SAVE_DIR}/best.pt')
-
-# ── Quick generation sample ───────────────────────────────────────────────────
-
-print('\n── Generation samples (oracle conditioning) ──')
-decoder.eval()
-
-with torch.no_grad():
-    # Take first 3 val examples
-    sample_z_T    = z_T_val[:3].to(DEVICE)
-    sample_tgt    = tgt_ids_val[:3]
-
-    # Prompt: just [CLS] token (101 in BERT)
-    prompt = torch.full((3, 1), 101, dtype=torch.long, device=DEVICE)
-
-    generated = decoder.generate(
-        prompt_ids     = prompt,
-        z_fused        = sample_z_T,
-        max_new_tokens = 30,
-        temperature    = 0.8,
-        top_k          = 50,
-    )
-
-    print('\nTarget turns:')
-    for i in range(3):
-        tokens = sample_tgt[i].tolist()
-        text   = tokenizer.decode(tokens, skip_special_tokens=True)
-        print(f'  [{i}] {text}')
-
-    print('\nGenerated turns (oracle z_T):')
-    for i in range(3):
-        tokens = generated[i].tolist()
-        text   = tokenizer.decode(tokens, skip_special_tokens=True)
-        print(f'  [{i}] {text}')
-
-# ── Plot ──────────────────────────────────────────────────────────────────────
-
-epochs_r = range(1, N_EPOCHS + 1)
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-
-axes[0].plot(epochs_r, history['train_loss'], 'b-', label='train')
-axes[0].plot(epochs_r, history['val_loss'],   'r-', label='val')
-axes[0].set_title('Cross Entropy Loss')
-axes[0].legend(); axes[0].grid(True, alpha=0.3)
-
-axes[1].plot(epochs_r, history['train_ppl'], 'b-', label='train')
-axes[1].plot(epochs_r, history['val_ppl'],   'r-', label='val')
-axes[1].set_title('Perplexity')
-axes[1].legend(); axes[1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig(SAVE_DIR / 'training_curves_s3.png', dpi=150)
-plt.close(fig)
-print(f'\nPlot saved → {SAVE_DIR}/training_curves_s3.png')
-print(f'Best val_loss: {best_val_loss:.4f}  val_ppl: {torch.exp(torch.tensor(best_val_loss)).item():.1f}')
+# s2 path at position 1 — after s3, so s3's packages still take priority
+_s2 = cfg.s2_module_path
+sys.path.insert(1, _s2)
+
+_dm_mod  = _load_from("s2_dm",     f"{_s2}/cog_arch/dm.py")
+_cfg_mod = _load_from("s2_config", f"{_s2}/config.py")
+
+DialogNextTurnPredictor = _dm_mod.DialogNextTurnPredictor
+S2Config                = _cfg_mod.Config
+
+# s3 modules — resolved from s3_dir (position 0)
+from data.data         import make_dataloaders
+from cog_arch.decoder  import S3Decoder
+from losses            import perplexity_from_loss, compute_generation_metrics
+
+
+# ── Seed ──────────────────────────────────────────────────────────────────────
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+# ── LR schedule ───────────────────────────────────────────────────────────────
+
+def get_scheduler(optimizer, warmup_steps: int, total_steps: int) -> LambdaLR:
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return float(step) / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
+    return LambdaLR(optimizer, lr_lambda)
+
+
+# ── Load frozen s2 ────────────────────────────────────────────────────────────
+
+def load_s2(cfg, device) -> DialogNextTurnPredictor:
+    s2_cfg = S2Config()
+    # propagate shared paths
+    s2_cfg.encoder_model  = cfg.encoder_model
+    s2_cfg.cache_dir      = cfg.cache_dir
+    s2_cfg.encoder_dim    = cfg.encoder_dim
+    s2_cfg.ctx_n_heads    = cfg.ctx_n_heads
+    s2_cfg.ctx_n_layers   = cfg.ctx_n_layers
+    s2_cfg.ctx_ffn_dim    = cfg.ctx_ffn_dim
+    s2_cfg.ctx_dropout    = cfg.ctx_dropout
+    s2_cfg.max_history    = cfg.max_history
+    s2_cfg.proj_hidden_dim = cfg.proj_hidden_dim
+    s2_cfg.freeze_encoder  = True
+
+    model = DialogNextTurnPredictor(s2_cfg).to(device)
+    ckpt  = torch.load(cfg.s2_checkpoint, map_location=device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad = False
+    print(f"[s3] s2 loaded & frozen from {cfg.s2_checkpoint} "
+          f"(epoch {ckpt['epoch']}, R@1={ckpt['metrics'].get('R@1', '?'):.4f})")
+    return model
+
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def evaluate(
+    s2_model:  DialogNextTurnPredictor,
+    s3_model:  S3Decoder,
+    loader,
+    gpt2_tok,
+    device,
+    cfg,
+    n_show:    int = 4,
+) -> dict:
+    s3_model.eval()
+    total_loss = 0.0
+    hypotheses, references = [], []
+
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+
+        with autocast(enabled=(device.type == "cuda")):
+            # get predicted embedding from frozen s2
+            z_hat, _ = s2_model(batch)                  # (B, D)
+            # decode loss
+            _, loss = s3_model(
+                z_hat,
+                batch["dec_input_ids"],
+                batch["dec_labels"],
+                batch["dec_attn_mask"],
+            )
+        total_loss += loss.item()
+
+        # generate a few samples for BLEU / Distinct
+        if len(hypotheses) < 512:
+            generated = s3_model.generate(
+                z_hat[:4].float(),      # generate for first 4 in batch
+                gpt2_tok,
+                max_new_tokens = cfg.gen_max_new_tokens,
+                temperature    = cfg.gen_temperature,
+                top_p          = cfg.gen_top_p,
+                do_sample      = cfg.gen_do_sample,
+            )
+            # decode reference targets
+            ref_ids = batch["dec_labels"][:4]
+            for ref_row in ref_ids:
+                valid = ref_row[ref_row != -100]
+                references.append(gpt2_tok.decode(valid, skip_special_tokens=True))
+            hypotheses.extend(generated)
+
+    avg_loss = total_loss / len(loader)
+    metrics  = {"loss": avg_loss, "PPL": perplexity_from_loss(avg_loss)}
+    if hypotheses:
+        metrics.update(compute_generation_metrics(hypotheses, references))
+
+    # print a few examples
+    print(f"\n  {'─'*60}")
+    print(f"  Sample generations (val):")
+    for h, r in zip(hypotheses[:n_show], references[:n_show]):
+        print(f"  REF : {r[:100]}")
+        print(f"  GEN : {h[:100]}")
+        print()
+    print(f"  {'─'*60}")
+
+    s3_model.train()
+    return metrics
+
+
+# ── Checkpoint helpers ─────────────────────────────────────────────────────────
+
+def save_checkpoint(s3_model, optimizer, scheduler, epoch, metrics, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save({
+        "epoch":     epoch,
+        "model":     s3_model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "metrics":   metrics,
+    }, path)
+    print(f"  [ckpt] saved → {path}")
+
+
+def load_checkpoint(path, s3_model, optimizer=None, scheduler=None):
+    ckpt = torch.load(path, map_location="cpu")
+    s3_model.load_state_dict(ckpt["model"])
+    if optimizer:  optimizer.load_state_dict(ckpt["optimizer"])
+    if scheduler:  scheduler.load_state_dict(ckpt["scheduler"])
+    print(f"[ckpt] resumed from epoch {ckpt['epoch']}: {path}")
+    return ckpt["epoch"], ckpt.get("metrics", {})
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def train(cfg=cfg):
+    set_seed(cfg.seed)
+    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    print(f"[s3] device = {device}")
+
+    # Data
+    train_loader, val_loader, test_loader = make_dataloaders(cfg)
+
+    # GPT-2 tokenizer (for generation / decoding references)
+    gpt2_tok = GPT2Tokenizer.from_pretrained(cfg.decoder_model, cache_dir=cfg.cache_dir)
+    gpt2_tok.pad_token    = gpt2_tok.eos_token
+    gpt2_tok.pad_token_id = gpt2_tok.eos_token_id
+
+    # Frozen s2
+    s2_model = load_s2(cfg, device)
+
+    # s3 decoder
+    s3_model = S3Decoder(cfg).to(device)
+    n_params = sum(p.numel() for p in s3_model.parameters() if p.requires_grad)
+    print(f"[s3] trainable parameters: {n_params:,}")
+
+    # Optimiser — only s3 parameters
+    optimizer = AdamW(s3_model.parameters(), lr=cfg.lr, weight_decay=0.01)
+    total_steps = len(train_loader) * cfg.num_epochs
+    scheduler   = get_scheduler(optimizer, cfg.warmup_steps, total_steps)
+    scaler      = GradScaler(enabled=(cfg.fp16 and device.type == "cuda"))
+
+    # Resume if checkpoint exists
+    best_ckpt   = Path(cfg.output_dir) / "best.pt"
+    latest_ckpt = Path(cfg.output_dir) / "latest.pt"
+    start_epoch = 0
+    best_ppl    = float("inf")
+
+    if latest_ckpt.exists():
+        start_epoch, prev = load_checkpoint(str(latest_ckpt), s3_model, optimizer, scheduler)
+        best_ppl    = prev.get("PPL", float("inf"))
+        start_epoch += 1
+
+    global_step = start_epoch * len(train_loader)
+
+    for epoch in range(start_epoch, cfg.num_epochs):
+        s3_model.train()
+        epoch_loss  = 0.0
+        epoch_start = time.time()
+
+        for batch in train_loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+
+            with autocast(enabled=(cfg.fp16 and device.type == "cuda")):
+                # 1. Get ẑ from frozen s2 (no grad)
+                with torch.no_grad():
+                    z_hat, _ = s2_model(batch)           # (B, D)
+
+                # 2. Decode and compute CE loss
+                _, loss = s3_model(
+                    z_hat,
+                    batch["dec_input_ids"],
+                    batch["dec_labels"],
+                    batch["dec_attn_mask"],
+                )
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(s3_model.parameters(), cfg.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
+
+            epoch_loss  += loss.item()
+            global_step += 1
+
+            if global_step % cfg.log_steps == 0:
+                print(f"  ep {epoch+1:>3} | step {global_step:>6} "
+                      f"| loss {loss.item():.4f} "
+                      f"| ppl {perplexity_from_loss(loss.item()):.2f} "
+                      f"| lr {optimizer.param_groups[0]['lr']:.2e}")
+
+        avg_loss = epoch_loss / len(train_loader)
+        elapsed  = time.time() - epoch_start
+        print(f"\n[epoch {epoch+1}/{cfg.num_epochs}] "
+              f"avg_loss={avg_loss:.4f}  "
+              f"ppl={perplexity_from_loss(avg_loss):.2f}  "
+              f"time={elapsed:.1f}s")
+
+        # Eval
+        if (epoch + 1) % cfg.eval_every == 0 and val_loader is not None:
+            metrics = evaluate(s2_model, s3_model, val_loader, gpt2_tok, device, cfg)
+            print(f"  [val] loss={metrics['loss']:.4f} | "
+                  f"PPL={metrics['PPL']:.2f} | "
+                  f"BLEU-1={metrics.get('BLEU-1', 0):.4f} | "
+                  f"BLEU-4={metrics.get('BLEU-4 (BP)', 0):.4f} | "
+                  f"D-1={metrics.get('Distinct-1', 0):.4f} | "
+                  f"D-2={metrics.get('Distinct-2', 0):.4f}")
+
+            if metrics["PPL"] < best_ppl:
+                best_ppl = metrics["PPL"]
+                save_checkpoint(s3_model, optimizer, scheduler, epoch,
+                                metrics, str(best_ckpt))
+                print(f"  [val] ★ new best PPL = {best_ppl:.2f}")
+
+        if (epoch + 1) % cfg.save_every == 0:
+            save_checkpoint(s3_model, optimizer, scheduler, epoch,
+                            {"PPL": best_ppl}, str(latest_ckpt))
+
+    # Final test eval
+    if test_loader is not None and best_ckpt.exists():
+        print("\n[test] loading best checkpoint...")
+        load_checkpoint(str(best_ckpt), s3_model)
+        test_metrics = evaluate(s2_model, s3_model, test_loader, gpt2_tok, device, cfg)
+        print(f"[test] PPL={test_metrics['PPL']:.2f} | "
+              f"BLEU-1={test_metrics.get('BLEU-1', 0):.4f} | "
+              f"BLEU-4={test_metrics.get('BLEU-4 (BP)', 0):.4f} | "
+              f"D-1={test_metrics.get('Distinct-1', 0):.4f} | "
+              f"D-2={test_metrics.get('Distinct-2', 0):.4f}")
+
+    print("\n[s3] done.")
+    return s3_model
+
+
+if __name__ == "__main__":
+    train(cfg)

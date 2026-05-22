@@ -1,268 +1,254 @@
-#!/usr/bin/env python3
 """
-Stage 2: Entrenamiento del Predictor JEPA (Turn Pair Prediction)
+train.py — Training loop for the dialog next-turn predictor.
+
+Features:
+  - Mixed precision (fp16) via torch.cuda.amp
+  - Linear warmup + cosine decay LR schedule
+  - Separate LR for encoder vs. the rest (when freeze_encoder=False)
+  - Full-pool Recall@K and MRR evaluated at the end of every eval epoch
+  - Best checkpoint saved by R@1 on the val set
+  - Clean per-step + per-epoch logging
+
+Usage (Colab / terminal):
+  from config import cfg
+  from train  import train
+  train(cfg)
 """
 
-import sys
-import os
-import copy
-import importlib.util
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import random
+import time
 from pathlib import Path
 
+import numpy as np
 import torch
+from torch.cuda.amp import GradScaler, autocast
 from torch.optim import AdamW
-from tqdm import tqdm
-import logging
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import LambdaLR
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT = '/content/notebooks_meta'
-S1   = f'{ROOT}/v5/s1'
-S2   = f'{ROOT}/v5/s2'
-sys.path.insert(0, ROOT)
-
-# ── Config de S2 (explícito para no pisar s1/config.py) ──────────────────────
-from v5.s2.config import CFG, DEVICE
-
-# ── Arquitecturas ─────────────────────────────────────────────────────────────
-from v5.s1.cog_arch.encoder import Encoder
-from v5.s2.cog_arch.dm import DM, Projector
-from v5.s2.losses import VCLoss
-
-from v5.s2.data.dataset import VOCAB_SIZE, tokenizer
-from v5.s2.data.dataloader import get_stage2_dataloaders
+from config import cfg
+from data.data   import make_dataloaders
+from losses   import InfoNCELoss, recall_at_k, mean_reciprocal_rank
+from cog_arch.dm  import DialogNextTurnPredictor
 
 
-# ========================== Dataloaders ==========================
+# ── Reproducibility ─────────────────────────────────────────────────────────────
 
-train_loader, val_loader = get_stage2_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
-print(f"Train batches: {len(train_loader)} | Val batches: {len(val_loader)}")
-
-# ========================== Models ==========================
-
-context_encoder = Encoder(
-    vocab_size  = CFG.model.vocab_size,
-    hidden_size = CFG.model.hidden_size,
-    num_heads   = CFG.model.num_heads,
-    num_layers  = CFG.model.num_layers,
-    max_seq_len = CFG.model.max_seq_len,
-).to(DEVICE)
-target_encoder = copy.deepcopy(context_encoder).to(DEVICE)
-
-# Cargar checkpoint Stage 1
-s1_ckpt = torch.load(CFG.training.s1_ckpt, map_location=DEVICE, weights_only=False)
-context_encoder.load_state_dict(s1_ckpt['context_encoder'])
-target_encoder.load_state_dict(s1_ckpt['target_encoder'])
-print(f"✓ S1 checkpoint cargado (epoch {s1_ckpt.get('epoch', '?')})")
-
-for enc in (context_encoder, target_encoder):
-    enc.eval()
-    for p in enc.parameters():
-        p.requires_grad = False
-print("Encoders frozen.")
-
-predictor = DM(
-    num_frames = CFG.model.max_seq_len,
-    depth      = CFG.model.pred_num_layers,
-    heads      = CFG.model.pred_num_heads,
-    mlp_dim    = CFG.model.pred_hidden_size * 4,
-    input_dim  = CFG.model.dstc,
-    hidden_dim = CFG.model.pred_hidden_size,
-    output_dim = CFG.model.dstc,
-    dim_head   = 64,
-    dropout    = 0.1,
-    emb_dropout= 0.1,
-).to(DEVICE)
-print(f"Predictor params: {sum(p.numel() for p in predictor.parameters()):,}")
-
-dstc      = CFG.model.dstc
-projector = Projector(f"{dstc}-{dstc*2}-{dstc}").to(DEVICE)
-print(f"Projector: {dstc}-{dstc*4}-{dstc*4}")
-
-# ========================== Loss / Optimizer ==========================
-
-ploss       = torch.nn.MSELoss()
-regularizer = VCLoss(std_coeff=CFG.loss.std_coeff, cov_coeff=CFG.loss.cov_coeff)
-
-trainable_params = list(predictor.parameters()) + list(projector.parameters())
-optimizer = AdamW(trainable_params, lr=CFG.optim.lr, weight_decay=CFG.optim.weight_decay)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer, T_max=CFG.optim.epochs, eta_min=CFG.optim.lr * 0.1)
-# ========================== Helpers ==========================
-
-def project_seq(projector, x):
-    """
-    Aplica el projector a una secuencia (B, L, D).
-    BatchNorm1d espera (N, D) — reshapeamos, proyectamos, volvemos.
-    """
-    B, L, D = x.shape
-    x_flat  = x.reshape(B * L, D)          # (B*L, D)
-    out     = projector(x_flat)             # (B*L, D')
-    return out.reshape(B, L, -1)            # (B, L, D')
-
-def seq_mse_loss(pred, target, mask):
-    """
-    MSE solo en posiciones no-padding.
-    pred, target : (B, L, D)
-    mask         : (B, L) — 1 = token real, 0 = padding
-    """
-    mask_f = mask.unsqueeze(-1).float()     # (B, L, 1)
-    diff   = (pred - target) ** 2           # (B, L, D)
-    loss   = (diff * mask_f).sum() / (mask_f.sum() * pred.size(-1) + 1e-9)
-    return loss
-
-def unpack(batch):
-    return (
-        batch['input_ids_a'].to(DEVICE),
-        batch['attention_mask_a'].to(DEVICE),
-        batch['input_ids_b'].to(DEVICE),
-        batch['attention_mask_b'].to(DEVICE),
-    )
-
-def forward_step(batch):
-    ctx_ids, ctx_mask, tgt_ids, tgt_mask = unpack(batch)
-
-    with torch.no_grad():
-        ctx_h = context_encoder(ctx_ids, attention_mask=ctx_mask)
-        tgt_h = target_encoder(tgt_ids, attention_mask=tgt_mask)
-        if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
-        if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
-    # ctx_h, tgt_h : (B, L, D)
-
-    # Predictor: secuencia completa, condicionado por sí mismo
-    pred = predictor(ctx_h, ctx_h)          # (B, L, D)
-
-    # Proyectar secuencias completas
-    pred_proj = project_seq(projector, pred)            # (B, L, D')
-    tgt_proj  = project_seq(projector, tgt_h.detach()) # (B, L, D')
-
-    # Loss solo en tokens reales del target
-    pred_loss           = seq_mse_loss(pred_proj, tgt_proj, tgt_mask)
-
-    # VC loss: aplanar a (B*L, D') filtrando padding
-    B, L, Dp = pred_proj.shape
-    mask_flat = tgt_mask.reshape(B * L).bool()
-    pred_flat = pred_proj.reshape(B * L, Dp)[mask_flat]  # solo tokens reales
-    vc_loss, _, _ = regularizer(pred_flat)
-
-    loss = pred_loss + vc_loss
-    return {'loss': loss, 'pred_loss': pred_loss, 'vc_loss': vc_loss}
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
-def save_best(epoch, val_loss):
-    path = Path(CFG.logging.exp_dir) / 'best.pt'
-    torch.save({
-        'epoch':     epoch,
-        'predictor': predictor.state_dict(),
-        'projector': projector.state_dict(),
-        'optimizer': optimizer.state_dict(),
-        'scheduler': scheduler.state_dict(),
-        'val_loss':  val_loss,
-    }, path)
-    print(f'  ✓ saved → {path}')
+# ── LR Schedule: linear warmup + cosine decay ──────────────────────────────────
+
+def get_scheduler(optimizer, warmup_steps: int, total_steps: int) -> LambdaLR:
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return float(step) / max(1, warmup_steps)
+        progress = float(step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
+    return LambdaLR(optimizer, lr_lambda)
+
+
+# ── Evaluation ─────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def validation_loop():
-    predictor.eval(); projector.eval()
-    totals = {}; n = 0
-    for batch in val_loader:
-        d = forward_step(batch)
-        for k, v in d.items():
-            totals[k] = totals.get(k, 0.0) + v.item()
-        n += 1
-    predictor.train(); projector.train()
-    return {k: v/n for k, v in totals.items()}
+def evaluate(model, loader, criterion, device) -> dict:
+    """
+    Runs the model over the full loader and returns:
+      - avg InfoNCE loss
+      - R@1, R@5, R@10 over the full candidate pool
+      - MRR
+    """
+    model.eval()
+    total_loss   = 0.0
+    all_pred     = []
+    all_target   = []
 
-# ========================== Training Loop ==========================
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        with autocast(enabled=(device.type == "cuda")):
+            pred_emb, target_emb = model(batch)
+            loss = criterion(pred_emb, target_emb)
 
-history = {'train_loss': [], 'train_pred': [], 'train_vc': [],
-           'val_loss':   [], 'val_pred':   [], 'val_vc':   []}
+        total_loss   += loss.item()
+        all_pred.append(pred_emb.float().cpu())
+        all_target.append(target_emb.float().cpu())
 
-best_val_loss = float('inf')
-Path(CFG.logging.exp_dir).mkdir(parents=True, exist_ok=True)
+    # pool all embeddings for full-pool retrieval metrics
+    all_pred   = torch.cat(all_pred,   dim=0)  # (N, D)
+    all_target = torch.cat(all_target, dim=0)  # (N, D)
 
-# Resume desde best si existe
-best_ckpt = Path(CFG.logging.exp_dir) / 'best.pt'
-start_epoch = 1
-if best_ckpt.exists():
-    ckpt = torch.load(best_ckpt, map_location=DEVICE, weights_only=False)
-    predictor.load_state_dict(ckpt['predictor'])
-    projector.load_state_dict(ckpt['projector'])
-    optimizer.load_state_dict(ckpt['optimizer'])
-    scheduler.load_state_dict(ckpt['scheduler'])
-    best_val_loss = ckpt['val_loss']
-    start_epoch   = ckpt['epoch'] + 1
-    print(f'Resumiendo desde epoch {ckpt["epoch"]}  val_loss={best_val_loss:.4f}')
-else:
-    print('Sin checkpoint previo, empezando desde cero.')
+    metrics = recall_at_k(all_pred, all_target, ks=(1, 5, 10))
+    metrics["MRR"]  = mean_reciprocal_rank(all_pred, all_target)
+    metrics["loss"] = total_loss / len(loader)
 
-print(f'\n{"="*60}')
-print(f'  Text JEPA S2 — {CFG.optim.epochs} epochs   device={DEVICE}')
-print(f'{"="*60}\n')
+    model.train()
+    return metrics
 
-for epoch in range(start_epoch, CFG.optim.epochs + 1):
-    predictor.train(); projector.train()
-    totals = {}; n = 0
 
-    pbar = tqdm(train_loader, desc=f'Epoch {epoch:02d}', leave=False)
-    for batch in pbar:
-        d = forward_step(batch)
-        d['loss'].backward()
-        torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
-        optimizer.step(); optimizer.zero_grad()
-        for k, v in d.items():
-            totals[k] = totals.get(k, 0.0) + v.item()
-        n += 1
-        pbar.set_postfix({k: f'{v.item():.4f}' for k, v in d.items()})
+# ── Checkpoint helpers ─────────────────────────────────────────────────────────
 
-    scheduler.step()
-    tr = {k: v/n for k, v in totals.items()}
-    vl = validation_loop()
+def save_checkpoint(model, optimizer, scheduler, epoch, metrics, path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save({
+        "epoch":              epoch,
+        "model_state_dict":   model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "metrics":            metrics,
+    }, path)
+    print(f"  [ckpt] saved → {path}")
 
-    history['train_loss'].append(tr['loss'].item() if torch.is_tensor(tr['loss']) else tr['loss'])
-    history['train_pred'].append(tr['pred_loss'].item() if torch.is_tensor(tr['pred_loss']) else tr['pred_loss'])
-    history['train_vc'].append(tr['vc_loss'].item() if torch.is_tensor(tr['vc_loss']) else tr['vc_loss'])
-    history['val_loss'].append(vl['loss'])
-    history['val_pred'].append(vl['pred_loss'])
-    history['val_vc'].append(vl['vc_loss'])
 
-    print(
-        f'Epoch {epoch:02d}/{CFG.optim.epochs}  '
-        f'train={tr["loss"]:.4f} (pred={tr["pred_loss"]:.4f} vc={tr["vc_loss"]:.4f})  '
-        f'val={vl["loss"]:.4f}  '
-        f'lr={optimizer.param_groups[0]["lr"]:.2e}'
+def load_checkpoint(path: str, model, optimizer=None, scheduler=None):
+    ckpt = torch.load(path, map_location="cpu")
+    model.load_state_dict(ckpt["model_state_dict"])
+    if optimizer and "optimizer_state_dict" in ckpt:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    if scheduler and "scheduler_state_dict" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    print(f"[ckpt] loaded epoch {ckpt['epoch']} from {path}")
+    return ckpt["epoch"], ckpt.get("metrics", {})
+
+
+# ── Main Training Function ─────────────────────────────────────────────────────
+
+def train(cfg=cfg):
+    set_seed(cfg.seed)
+
+    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
+    print(f"[train] device = {device}")
+
+    # ── Data ──────────────────────────────────────────────────────────────────
+    train_loader, val_loader, test_loader = make_dataloaders(cfg)
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    model = DialogNextTurnPredictor(cfg).to(device)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[model] trainable parameters: {n_params:,}")
+
+    # ── Optimiser ─────────────────────────────────────────────────────────────
+    # Separate param groups: encoder (lower lr) vs. context transformer + proj
+    encoder_params = list(model.encoder.parameters())
+    other_params   = (
+        list(model.context_transformer.parameters()) +
+        list(model.projection.parameters())
     )
 
-    if vl['loss'] < best_val_loss:
-        best_val_loss = vl['loss']
-        save_best(epoch, best_val_loss)
-        print(f'  ★ new best val_loss={best_val_loss:.4f}')
+    if cfg.freeze_encoder:
+        param_groups = [{"params": other_params, "lr": cfg.lr}]
+    else:
+        param_groups = [
+            {"params": encoder_params, "lr": cfg.encoder_lr},
+            {"params": other_params,   "lr": cfg.lr},
+        ]
 
-print('\nStage 2 complete.')
+    optimizer = AdamW(param_groups, weight_decay=0.01)
 
-# ── Plotting ──────────────────────────────────────────────────────────────────
-epochs_range = list(range(1, len(history['train_loss']) + 1))
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    total_steps = len(train_loader) * cfg.num_epochs
+    scheduler   = get_scheduler(optimizer, cfg.warmup_steps, total_steps)
 
-axes[0].plot(epochs_range, history['train_loss'], 'b-o', label='Train', markersize=4)
-axes[0].plot(epochs_range, history['val_loss'],   'r-s', label='Val',   markersize=4)
-axes[0].set_title('Total Loss'); axes[0].legend(); axes[0].grid(True, alpha=0.3)
+    criterion = InfoNCELoss(temperature=cfg.temperature).to(device)
+    scaler    = GradScaler(enabled=(cfg.fp16 and device.type == "cuda"))
 
-axes[1].plot(epochs_range, history['train_pred'], 'g-^', label='Train pred', markersize=4)
-axes[1].plot(epochs_range, history['val_pred'],   'm-v', label='Val pred',   markersize=4)
-axes[1].set_title('Prediction Loss (MSE)'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+    # ── Resume from checkpoint if available ───────────────────────────────────
+    best_ckpt   = Path(cfg.output_dir) / "best.pt"
+    latest_ckpt = Path(cfg.output_dir) / "latest.pt"
+    start_epoch = 0
+    best_r1     = 0.0
 
-axes[2].plot(epochs_range, history['train_vc'], 'c-o', label='Train VC', markersize=4)
-axes[2].plot(epochs_range, history['val_vc'],   'k-s', label='Val VC',   markersize=4)
-axes[2].set_title('VC Regularization Loss'); axes[2].legend(); axes[2].grid(True, alpha=0.3)
+    if latest_ckpt.exists():
+        start_epoch, prev_metrics = load_checkpoint(
+            str(latest_ckpt), model, optimizer, scheduler
+        )
+        best_r1     = prev_metrics.get("R@1", 0.0)
+        start_epoch += 1
 
-plt.tight_layout()
-plot_path = Path(CFG.logging.exp_dir) / 'training_curves_stage2.png'
-plt.savefig(plot_path, dpi=150); plt.close(fig)
-print(f'Plot saved → {plot_path}')
-print(f'Best val_loss: {best_val_loss:.4f}')
+    # ── Training Loop ─────────────────────────────────────────────────────────
+    global_step = start_epoch * len(train_loader)
+
+    for epoch in range(start_epoch, cfg.num_epochs):
+        model.train()
+        epoch_loss  = 0.0
+        epoch_start = time.time()
+
+        for step, batch in enumerate(train_loader):
+            batch = {k: v.to(device) for k, v in batch.items()}
+
+            with autocast(enabled=(cfg.fp16 and device.type == "cuda")):
+                pred_emb, target_emb = model(batch)
+                loss = criterion(pred_emb, target_emb)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
+
+            epoch_loss  += loss.item()
+            global_step += 1
+
+            if global_step % cfg.log_steps == 0:
+                lr_main = optimizer.param_groups[-1]["lr"]
+                print(
+                    f"  ep {epoch+1:>3} | step {global_step:>6} "
+                    f"| loss {loss.item():.4f} | lr {lr_main:.2e}"
+                )
+
+        avg_loss = epoch_loss / len(train_loader)
+        elapsed  = time.time() - epoch_start
+        print(f"\n[epoch {epoch+1}/{cfg.num_epochs}] "
+              f"avg_loss={avg_loss:.4f}  time={elapsed:.1f}s")
+
+        # ── Evaluation ────────────────────────────────────────────────────────
+        if (epoch + 1) % cfg.eval_every == 0 and val_loader is not None:
+            metrics = evaluate(model, val_loader, criterion, device)
+            print(
+                f"  [val] loss={metrics['loss']:.4f} | "
+                f"R@1={metrics['R@1']:.4f} | "
+                f"R@5={metrics['R@5']:.4f} | "
+                f"R@10={metrics['R@10']:.4f} | "
+                f"MRR={metrics['MRR']:.4f}"
+            )
+
+            if metrics["R@1"] > best_r1:
+                best_r1 = metrics["R@1"]
+                save_checkpoint(model, optimizer, scheduler, epoch,
+                                metrics, str(best_ckpt))
+                print(f"  [val] ★ new best R@1 = {best_r1:.4f}")
+
+        # ── Periodic save ─────────────────────────────────────────────────────
+        if (epoch + 1) % cfg.save_every == 0:
+            save_checkpoint(model, optimizer, scheduler, epoch,
+                            {"R@1": best_r1}, str(latest_ckpt))
+
+    # ── Final test evaluation ──────────────────────────────────────────────────
+    if test_loader is not None and best_ckpt.exists():
+        print("\n[test] loading best checkpoint for final evaluation...")
+        load_checkpoint(str(best_ckpt), model)
+        test_metrics = evaluate(model, test_loader, criterion, device)
+        print(
+            f"[test] loss={test_metrics['loss']:.4f} | "
+            f"R@1={test_metrics['R@1']:.4f} | "
+            f"R@5={test_metrics['R@5']:.4f} | "
+            f"R@10={test_metrics['R@10']:.4f} | "
+            f"MRR={test_metrics['MRR']:.4f}"
+        )
+
+    print("\n[train] done.")
+    return model
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    train(cfg)

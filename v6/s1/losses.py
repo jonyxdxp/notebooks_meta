@@ -1,15 +1,10 @@
 
 
-# (Losses and Regularization ("retention" in Cognitive terms))
 
-
-# will also be the "Energy Function" for our EBM, since we will be training the EBM to minimize this loss function, so the loss function is effectively the energy function that the EBM is modeling. 
-# The EBM will learn to assign low energy (loss) to good reconstructions and high energy (loss) to bad reconstructions, thus learning a landscape of the loss function.
+# from https://github.com/jordiclive/Convert-PolyAI-Torch/blob/master/src/criterion.py
 
 
 
-
-# from https://github.com/facebookresearch/eb_jepa/blob/main/eb_jepa/losses.py
 
 
 
@@ -22,83 +17,42 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
+class LossFunction(nn.Module):
+    @staticmethod
+    def cosine_similarity_matrix(
+        context_embed: torch.Tensor, reply_embed: torch.Tensor
+    ) -> torch.Tensor:
+        assert context_embed.size(0) == reply_embed.size(0)
+        cosine_similarity = torch.matmul(
+            context_embed, reply_embed.T
+        )  # both normalized already from last layer. So cosine similarity for batch can be
+        # efficiently calculated as  simply similarity matrix
+        return cosine_similarity
+
+    def forward(
+        self, context_embed: torch.Tensor, reply_embed: torch.Tensor
+    ) -> torch.Tensor:
+        cosine_similarity = self.cosine_similarity_matrix(context_embed, reply_embed)
+        j = -torch.sum(torch.diagonal(cosine_similarity))
+
+        cosine_similarity.diagonal().copy_(torch.zeros(cosine_similarity.size(0)))
+        # The abel smoothing implemented is not clear from the paper. As not CE loss, have negative sampling.
+        # I assumed a lessening of how penalized the model is when assigns non zero probs
+        # to wrong class by increasing the negative component of loss fn by label smoothing mass indicated in paper
+
+        j = 0.8 * j + (
+            0.2 / (cosine_similarity.size(0) * (cosine_similarity.size(0) - 1))
+        ) * torch.sum(cosine_similarity)
 
 
+        j += torch.sum(torch.logsumexp(cosine_similarity, dim=0))
 
+        # torch.logsumexp(input, dim, keepdim=False, out=None)
 
-
-
-
-
-
-
-# BCS (Batched Characteristic Slicing) loss for SIGReg
-
-
-def all_reduce(x, op):
-    """All-reduce operation for distributed training."""
-    import torch.distributed as dist
-
-    if dist.is_available() and dist.is_initialized():
-        op = dist.ReduceOp.__dict__[op]
-        dist.all_reduce(x, op=op)
-        return x
-    else:
-        return x
-
-
-def epps_pulley(x, t_min=-3, t_max=3, n_points=10):
-    """Epps-Pulley test statistic for Gaussianity."""
-    # integration points
-    t = torch.linspace(t_min, t_max, n_points, device=x.device)
-    # theoretical CF for N(0, 1)
-    exp_f = torch.exp(-0.5 * t**2)
-    # ECF
-    x_t = x.unsqueeze(2) * t  # (N, M, T)
-    ecf = (1j * x_t).exp().mean(0)
-    ecf = all_reduce(ecf, op="AVG")
-    # weighted L2 distance
-    err = exp_f * (ecf - exp_f).abs() ** 2
-    T = torch.trapz(err, t, dim=1)
-    return T
-
-
-
-
-class BCS(nn.Module):
-    """BCS (Batched Characteristic Slicing) loss for SIGReg."""
-
-    def __init__(self, num_slices=256, lmbd=10.0):
-        super().__init__()
-        self.num_slices = num_slices
-        self.step = 0
-        self.lmbd = lmbd
-
-    def forward(self, z1, z2):
-        with torch.no_grad():
-            dev = z1.device
-            g = torch.Generator(device=dev)
-            g.manual_seed(self.step)
-            proj_shape = (z1.size(1), self.num_slices)
-            A = torch.randn(proj_shape, device=dev, generator=g)
-            A /= A.norm(p=2, dim=0)
-        view1 = z1 @ A
-        view2 = z2 @ A
-
-        self.step += 1
-        bcs = (epps_pulley(view1).mean() + epps_pulley(view2).mean()) / 2
-        invariance_loss = F.mse_loss(z1, z2).mean()
-        total_loss = invariance_loss + self.lmbd * bcs
-        return {"loss": total_loss, "bcs_loss": bcs, "invariance_loss": invariance_loss}
-
-
-
-
-
-
-
-
+        # Returns the log of summed exponentials of each row of the input tensor in the
+        # given dimension dim. Very important The computation is numerically stable with logs/exp in loss.
+        # This torch implementation is done in C.
+        return j  # negative of objective fn in paper as want loss fn
 

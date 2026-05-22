@@ -1,284 +1,156 @@
 
-# ── Cell 3: Imports ───────────────────────────────────────────────────────────
 
-import os           # <-- AGREGAR ESTA LÍNEA
-import glob         # <-- AGREGAR ESTA LÍNEA TAMBIÉN
 
-import copy
+# from https://github.com/jordiclive/Convert-PolyAI-Torch/blob/master/src/model.py
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import sys
-import typing
+sys.path.insert(0, '/content/notebooks_meta/v5_5/s1')
 
+import logging
+import random
+from collections import OrderedDict
+
+import numpy as np
+import pytorch_lightning as pl
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
+import math
 
 
+from config import ConveRTModelConfig, ConveRTTrainConfig
+from losses import LossFunction
 
-sys.path.insert(0, '/content/notebooks_meta/v5/s1')
+from cog_arch.encoder import FeedForward2, TransformerLayers
 
-from cog_arch.encoder import Encoder
-from losses import BCS   # BCS kept as optional alternative
+import argparse
+from sentencepiece import SentencePieceProcessor
+from data.dataset import DataModule, RedditData, load_instances_from_reddit_json
 
 
+logger = logging.getLogger(__name__)
 
-from data.dataloader import get_jepa_dataloaders
-from data.dataset import VOCAB_SIZE, tokenizer
 
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
 
+def find_subword_params(model):
+    """Long winded helper fn to return Subword Embedding Params for clipping, as they are the only parameters that
+    are gradient clipped in the paper, only calculated once after model instantiation, but before training"""
+    embeds = set()
+    for mn, m in model.named_modules():
+        for pn, p in m.named_parameters():
+            if mn.startswith("transformer_layers.subword_embedding"):
+                fpn = "%s.%s" % (mn, pn) if mn else pn  # full param name
 
+                embeds.add(fpn)
+    param_dict = {pn: p for pn, p in model.named_parameters()}
 
-# IMPORTANTE: Importar config PRIMERO para definir CFG y DEVICE
-import config
-from config import CFG, DEVICE
+    return [param_dict[pn] for pn in sorted(list(embeds))], embeds
 
 
+# todo  need to write own
+# lightning optimizer step to include torch.nn.utils.clip_grad_norm_(find_subword_params(model), config.grad_norm_clip),
 
 
-# ── Cell 9: Build dataloaders ─────────────────────────────────────────────────
+class SingleContextConvert(pl.LightningModule):
+    def __init__(
+            self, model_config: ConveRTModelConfig, train_config: ConveRTTrainConfig
+    ):
+        super().__init__()
 
-train_loader, val_loader = get_jepa_dataloaders(
-    cfg_obj    = CFG,
-    tokenizer  = tokenizer,
-)
+        self.model_config = model_config
+        self.train_config = train_config
+        self.transformer_layers = TransformerLayers(model_config)
+        self.ff2_context = FeedForward2(model_config)
+        self.ff2_reply = FeedForward2(model_config)
+        self.loss_function = LossFunction()
 
-print(f"Train batches : {len(train_loader)}  |  Val batches : {len(val_loader)}")
+        self.weight_decay = train_config.l2_weight_decay
 
+        # ✅ New — store under a different name
+        self._hparams_store = {**self.train_config._field_defaults, **self.model_config._field_defaults}
+        self.subword_params = None
 
+        logger.info(
+            "number of parameters: %e", sum(p.numel() for p in self.parameters())
+        )
+    def register_subword_params(self):
+        self.subword_params = find_subword_params(self)[0]
 
+    def forward(self, x):
+        return self.transformer_layers(x)
 
-
-
-
-# ── Cell 10: Models ───────────────────────────────────────────────────────────
-
-context_encoder = Encoder(
-    vocab_size   = VOCAB_SIZE,
-    hidden_size  = CFG.hidden_size,
-    num_heads    = CFG.num_heads,
-    num_layers   = CFG.num_layers,
-    max_seq_len  = CFG.max_seq_len,
-).to(DEVICE)
-
-target_encoder = copy.deepcopy(context_encoder).to(DEVICE)
-for p in target_encoder.parameters():
-    p.requires_grad = False   # updated only via EMA
-
-print(f"Params (context encoder) : {sum(p.numel() for p in context_encoder.parameters()):,}")
-
-
-
-
-
-
-
-
-# ── Cell 11: Loss / optimizer / scheduler ────────────────────────────────────
-
-# loss_fn = VICRegLoss(std_coeff=CFG.std_coeff, cov_coeff=CFG.cov_coeff)
-
-loss_fn = BCS(lmbd=10.0)   # lmbd controls Gaussianity regularization vs invariance
-
-
-
-optimizer = AdamW(
-    context_encoder.parameters(),
-    lr           = CFG.lr,
-    weight_decay = CFG.weight_decay,
-)
-
-
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer,
-    T_max  = CFG.n_epochs * 2,   # was n_epochs — decays over 2x the actual run
-    eta_min = CFG.lr * 0.3,      # was 0.1 — don't let it drop as low
-)
-
-
-
-
-
-
-
-# Create optimizer with nested learning
-
-    # optimizer = DeepMomentumGD(
-    #     model.parameters(),
-    #     lr=1e-3,
-    #     momentum=0.9,
-    #     memory_lr=1e-4,
-    # )
-
-
-
-
-
-
-
-# ── Cell 12: Helpers ──────────────────────────────────────────────────────────
-
-def ema_update(ctx_enc, tgt_enc, decay=CFG.ema_decay):
-    """Exponential moving average: tgt ← decay*tgt + (1-decay)*ctx"""
-    with torch.no_grad():
-        for p_c, p_t in zip(ctx_enc.parameters(), tgt_enc.parameters()):
-            p_t.data.mul_(decay).add_(p_c.data, alpha=1.0 - decay)
-
-
-def masked_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """
-    Mean-pool hidden states at masked positions per batch item.
-
-    Args:
-        hidden : (B, L, D)  encoder output
-        mask   : (B, L)     bool — True at target positions
-
-    Returns:
-        pooled : (B, D)
-    """
-    mask_f = mask.unsqueeze(-1).float()            # (B, L, 1)
-    summed = (hidden * mask_f).sum(dim=1)          # (B, D)
-    count  = mask_f.sum(dim=1).clamp(min=1)        # (B, 1)
-    return summed / count
-
-
-def unpack(batch):
-    return (
-        batch['context_input_ids'].to(DEVICE),
-        batch['context_attention_mask'].to(DEVICE),
-        batch['target_input_ids'].to(DEVICE),
-        batch['target_attention_mask'].to(DEVICE),
-        batch['target_mask'].to(DEVICE),
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ── Cell 13: Train / eval steps ───────────────────────────────────────────────
-
-def forward_step(batch):
-    """
-    Single JEPA forward pass (no predictor).
-
-    Returns a dict of scalar losses.
-    """
-    ctx_ids, ctx_mask, tgt_ids, tgt_mask, span_mask = unpack(batch)
-
-    # ── context encoder (grad flows here) ────────────────────────────────────
-    # Encoder is expected to return (sequence_hidden, pooled) or just hidden.
-    # Adjust the indexing below to match your Encoder's actual return signature.
-    ctx_hidden = context_encoder(ctx_ids, attention_mask=ctx_mask)   # (B, L, D)
-    if isinstance(ctx_hidden, tuple):
-        ctx_hidden = ctx_hidden[0]
-
-    # ── target encoder (no grad, EMA) ────────────────────────────────────────
-    with torch.no_grad():
-        tgt_hidden = target_encoder(tgt_ids, attention_mask=tgt_mask)
-        if isinstance(tgt_hidden, tuple):
-            tgt_hidden = tgt_hidden[0]
-
-    # ── pool only at masked positions ────────────────────────────────────────
-    z_ctx = masked_pool(ctx_hidden, span_mask)   # (B, D)
-    z_tgt = masked_pool(tgt_hidden, span_mask)   # (B, D)
-
-    # ── loss ─────────────────────────────────────────────────────────────────
-    return loss_fn(z_ctx, z_tgt)   # dict with 'loss', 'std_loss', 'cov_loss', etc.
-
-
-@torch.no_grad()
-def eval_epoch(loader):
-    context_encoder.eval()
-    totals = {}
-    n = 0
-    for batch in loader:
-        loss_dict = forward_step(batch)
-        for k, v in loss_dict.items():
-            totals[k] = totals.get(k, 0.0) + v.item()
-        n += 1
-    return {k: v / n for k, v in totals.items()}
-
-
-def train_epoch(loader, epoch):
-    context_encoder.train()
-    totals = {}
-    n = 0
-    pbar = tqdm(loader, desc=f'Epoch {epoch:02d}', leave=False)
-    for batch in pbar:
-        loss_dict = forward_step(batch)
-        loss = loss_dict['loss']
-
-        optimizer.zero_grad()
+    def backward(self, loss, optimizer, optimizer_idx):
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(context_encoder.parameters(), 1.0)
-        optimizer.step()
+        torch.nn.utils.clip_grad_norm_(self.subword_params, self.train_config.grad_norm_clip)
 
-        # EMA update after every gradient step
-        ema_update(context_encoder, target_encoder)
 
-        for k, v in loss_dict.items():
-            totals[k] = totals.get(k, 0.0) + v.item()
-        n += 1
+    def configure_optimizers(self):
+        """
+        here I did not implement weight decay on bias and Layernorm layers as is typical in modern  NLP papers.
+        I do not think the paper specified params to avoid weight decay on
+        :return:
+        :rtype:
+        """
+        # create the optimizer, here I did not implement weight decay on bias and weight as is customary in modern
+        # NLP papers.
+        no_decay = ["bias", "LayerNorm.weight"]
+        params_decay = [
+            p for n, p in self.named_parameters() if not any(nd in n for nd in no_decay)
+        ]
+        params_nodecay = [
+            p for n, p in self.named_parameters() if any(nd in n for nd in no_decay)
+        ]
+        optim_groups = [
+            {"params": params_decay, "weight_decay": self._hparams_store['l2_weight_decay']},
+            {"params": params_nodecay, "weight_decay": 0.0},
+        ]
+        optimizer = torch.optim.AdamW(optim_groups, lr=self._hparams_store['learning_rate'])
+        return optimizer
 
-        pbar.set_postfix({k: f'{v.item():.4f}' for k, v in loss_dict.items()})
+    def training_step(self, batch, batch_idx):
+        batch_context = batch.context
+        batch_reply = batch.reply
+        rx = self(batch_context)
+        ry = self(batch_reply)
+        hx = self.ff2_context(rx, batch_context.attention_mask)
+        hy = self.ff2_reply(ry, batch_reply.attention_mask)
 
-    return {k: v / n for k, v in totals.items()}
+        loss = self.loss_function(hx, hy)
+        self.log('train_loss', loss, prog_bar=True)  # ← add this
 
-# ── Cell 14: Checkpointing ────────────────────────────────────────────────────
 
-def save_checkpoint(epoch, metrics, suffix=None):
-    """Guarda checkpoint de encoders"""
-    if suffix is not None:
-        filename = f'{suffix}.pt'
-    elif isinstance(epoch, int):
-        filename = f'epoch_{epoch:03d}.pt'
-    else:
-        filename = f'epoch_{epoch}.pt'
+        tqdm_dict = {"train_loss": loss}
+        output = OrderedDict(
+            {"loss": loss, "progress_bar": tqdm_dict, "log": tqdm_dict}
+        )
+        # result = pl.TrainResult(minimize=loss, checkpoint_on=loss)
+        # result.log("train_loss", loss)
+        return output
+
+def validation_step(self, batch, batch_idx):
+    output = self.training_step(batch, batch_idx)
+    self.log('val_loss', output["loss"], prog_bar=True, on_epoch=True)  # ← add this
+    return {"val_loss": output["loss"]}
     
-    path = os.path.join(CFG.ckpt_dir, filename)
-    
-    torch.save({
-        'epoch':           epoch if isinstance(epoch, int) else -1,
-        'context_encoder': context_encoder.state_dict(),
-        'target_encoder':  target_encoder.state_dict(),
-        'optimizer':       optimizer.state_dict(),
-        'scheduler':       scheduler.state_dict(),
-        'metrics':         metrics,
-        'cfg':             {k: v for k, v in vars(CFG).items() if not k.startswith('_')},
-    }, path)
-    print(f'  ✓ saved → {path}')
-
-
-def load_checkpoint(path):
-    ckpt = torch.load(path, map_location=DEVICE)
-    context_encoder.load_state_dict(ckpt['context_encoder'])
-    target_encoder.load_state_dict(ckpt['target_encoder'])
-    optimizer.load_state_dict(ckpt['optimizer'])
-    scheduler.load_state_dict(ckpt['scheduler'])
-    print(f'  ✓ resumed from epoch {ckpt["epoch"]}')
-    return ckpt['epoch']
 
 
 
@@ -286,146 +158,112 @@ def load_checkpoint(path):
 
 
 
+# Really not clear from paper, paper starts talking about cosine annealing when discussing
+# the cosine similarity measure. Needs clarification
+# I assume 0.1 to 1 linear warm up over first 10000 batches  then annealed to 0.001
 
 
+class LearningRateDecayCallback(pl.Callback):
+    def __init__(
+        self,
+        config,
+        lr_decay=True,
+    ):
+        super().__init__()
+        self.lr_warmup_end = config.lr_warmup_end
+        self.lr_warmup_start = config.lr_warmup_start
+        self.learning_rate = config.learning_rate
+        self.warmup_batch = config.warmup_batch
+        self.final_batch = config.final_batch
+
+        self.lr_decay = lr_decay
 
 
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        """
+
+        :param trainer:
+        :type trainer:
+        :param pl_module:
+        :type pl_module:
+        :param batch:
+        :type batch:
+        :param batch_idx:
+        :type batch_idx:
+        :param dataloader_idx:
+        :type dataloader_idx:
+        """
+        optimizer = trainer.optimizers[0]
+
+        if self.lr_decay:
+            if batch_idx < self.warmup_batch:
+                # linear warmup, in paper: start from 0.1 to 1 over 10000 batches
+                lr_mult = float(batch_idx) / float(max(1, self.warmup_batch))
+                lr = self.lr_warmup_start + lr_mult * (
+                    self.lr_warmup_end - self.lr_warmup_start
+                )
+
+            else:
+                # Cosine learning rate decay
+                progress = float(batch_idx - self.warmup_batch) / float(
+                    max(1, self.final_batch - self.warmup_batch)
+                )
+
+                lr = max(
+                    self.learning_rate
+                    + 0.5
+                    * (1.0 + math.cos(math.pi * progress))
+                    * (self.lr_warmup_end - self.learning_rate),
+                    self.learning_rate,
+                )
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--progress_bar_refresh_rate", type=int, default=1)
+    parser.add_argument("--row_log_interval", type=int, default=1)
+
+    args = parser.parse_args([])  # ← empty list, ignore sys.argv
+    return args
 
 
+def main(**kwargs):
+    set_seed(1)
+    train_config = ConveRTTrainConfig()
+    model_config = ConveRTModelConfig()
+    tokenizer = SentencePieceProcessor()
+    args = _parse_args()
+    tokenizer.Load(train_config.sp_model_path)
+    train_instances = load_instances_from_reddit_json(train_config.dataset_path)
+    RD = RedditData(train_instances, tokenizer, 60)
+    dm = DataModule()
+    train_loader = dm.train_dataloader(RD)
+    model = SingleContextConvert(model_config, train_config)
+    lr_decay = LearningRateDecayCallback(train_config)
+    model.register_subword_params()
 
-
-
-
-
-
-
-
-
-
-# ── Cell 15: Training loop ────────────────────────────────────────────────────
-
-history = {
-    'train_loss': [], 'train_bcs': [], 'train_inv': [],
-    'val_loss':   [], 'val_bcs':   [], 'val_inv':   [],
-    'lr':         [],
-}
-
-print(f'\n{"="*60}')
-print(f'  Text JEPA — {CFG.n_epochs} epochs   device={DEVICE}')
-print(f'{"="*60}\n')
-
-# Resume from checkpoint if one exists
-import glob
-start_epoch = 1
-best_ckpt = os.path.join(CFG.ckpt_dir, 'best.pt')
-if os.path.exists(best_ckpt):
-    print(f'Resuming from best checkpoint …')
-    start_epoch = load_checkpoint(best_ckpt) + 1
-    print(f'  starting at epoch {start_epoch}')
-else:
-    print('No checkpoint found, starting from scratch.')
-
-best_val_loss = float('inf')
-
-for epoch in range(start_epoch, CFG.n_epochs + 1):
-    train_metrics = train_epoch(train_loader, epoch)
-    val_metrics   = eval_epoch(val_loader)
-    scheduler.step()
-
-    history['train_loss'].append(train_metrics.get('loss', 0.0))
-    history['train_bcs'].append(train_metrics.get('bcs_loss', 0.0))
-    history['train_inv'].append(train_metrics.get('invariance_loss', 0.0))
-    history['val_loss'].append(val_metrics.get('loss', 0.0))
-    history['val_bcs'].append(val_metrics.get('bcs_loss', 0.0))
-    history['val_inv'].append(val_metrics.get('invariance_loss', 0.0))
-    history['lr'].append(optimizer.param_groups[0]['lr'])
-
-    print(
-        f'Epoch {epoch:02d}/{CFG.n_epochs}  '
-        f'train_loss={train_metrics["loss"]:.4f}  '
-        f'val_loss={val_metrics["loss"]:.4f}  '
-        f'bcs={train_metrics.get("bcs_loss", 0):.4f}  '
-        f'inv={train_metrics.get("invariance_loss", 0):.4f}  '
-        f'lr={optimizer.param_groups[0]["lr"]:.2e}'
+    checkpoint_callback = pl.callbacks.ModelCheckpoint(
+    dirpath='/content/checkpoints',
+    filename='convert-{epoch:02d}-{train_loss:.2f}',
+    monitor='train_loss',   # ← change this
+    save_top_k=3,
+    mode='min',
+    every_n_epochs=1,
     )
 
-    if val_metrics['loss'] < best_val_loss:
-        best_val_loss = val_metrics['loss']
-        save_checkpoint('best', val_metrics)
-        print(f'  ★ new best val_loss={best_val_loss:.4f}')
-
-print('\nTraining complete.')
-save_checkpoint(CFG.n_epochs, {})
-
-
-
-
-
+    trainer = pl.Trainer.from_argparse_args(
+    args,
+    callbacks=[lr_decay, checkpoint_callback],
+    accelerator='gpu',
+    devices=1,
+    max_epochs=20,
+    log_every_n_steps=1,   # ← add this
+    **kwargs
+    )
+    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=train_loader)
 
 
-
-# ── Plotting ──────────────────────────────────────────────────────────────────
-import matplotlib
-matplotlib.use('Agg')   # non-interactive backend for scripts
-import matplotlib.pyplot as plt
-
-epochs_range = list(range(1, len(history['train_loss']) + 1))
-
-fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-
-# 1. Train vs Val Loss
-axes[0, 0].plot(epochs_range, history['train_loss'], 'b-o', label='Train Loss', markersize=4)
-axes[0, 0].plot(epochs_range, history['val_loss'],   'r-s', label='Val Loss',   markersize=4)
-axes[0, 0].set_xlabel('Epoch'); axes[0, 0].set_ylabel('Total Loss')
-axes[0, 0].set_title('Stage 1: Train vs Validation Loss')
-axes[0, 0].legend(); axes[0, 0].grid(True, alpha=0.3)
-
-# 2. BCS + Invariance components
-axes[0, 1].plot(epochs_range, history['train_bcs'], 'g-^', label='BCS Loss',        markersize=4)
-if any(v != 0.0 for v in history['train_inv']):
-    axes[0, 1].plot(epochs_range, history['train_inv'], 'm-v', label='Invariance Loss', markersize=4)
-axes[0, 1].set_xlabel('Epoch'); axes[0, 1].set_ylabel('Loss Component')
-axes[0, 1].set_title('BCS Loss Components')
-axes[0, 1].legend(); axes[0, 1].grid(True, alpha=0.3)
-
-# 3. Generalization gap
-gap = [t - v for t, v in zip(history['train_loss'], history['val_loss'])]
-axes[1, 0].plot(epochs_range, gap, 'k--o', markersize=4)
-axes[1, 0].axhline(y=0, color='r', linestyle='-', alpha=0.3)
-axes[1, 0].set_xlabel('Epoch'); axes[1, 0].set_ylabel('Train − Val Loss')
-axes[1, 0].set_title('Generalization Gap (lower = better)')
-axes[1, 0].grid(True, alpha=0.3)
-
-# 4. Relative improvement
-baseline = history['val_loss'][0]
-improvement = [(baseline - v) / baseline * 100 for v in history['val_loss']]
-axes[1, 1].plot(epochs_range, improvement, 'c-s', markersize=4)
-axes[1, 1].set_xlabel('Epoch'); axes[1, 1].set_ylabel('Improvement % over baseline')
-axes[1, 1].set_title('Relative Val Loss Improvement')
-axes[1, 1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plot_path = os.path.join(CFG.ckpt_dir, 'training_curves_stage1.png')
-plt.savefig(plot_path, dpi=150)
-plt.close(fig)
-print(f'\nPlot saved → {plot_path}')
-print(f'Improvement total : {improvement[-1]:.1f}%')
-print(f'Val loss final    : {history["val_loss"][-1]:.4f}')
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+if __name__ == "__main__":
+    main()

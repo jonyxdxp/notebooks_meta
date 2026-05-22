@@ -1,44 +1,59 @@
 """
-Config loader para YAML anidado (nested structure)
-Soporta: CFG.model.hidden_size, CFG.data.batch_size, etc.
+config.py — central configuration for the dialog next-turn prediction experiment.
+All paths, model hyper-params, and training settings live here.
 """
-import os
-import yaml
-import torch
-from types import SimpleNamespace
+from dataclasses import dataclass, field
+from pathlib import Path
 
-def dict_to_namespace(d):
-    """Convierte diccionario anidado a SimpleNamespace recursivamente"""
-    if isinstance(d, dict):
-        for key, value in d.items():
-            d[key] = dict_to_namespace(value)
-        return SimpleNamespace(**d)
-    elif isinstance(d, list):
-        return [dict_to_namespace(item) for item in d]
-    else:
-        return d
 
-# Cargar YAML
-config_path = os.path.join(os.path.dirname(__file__), 'config/default.yaml')
-with open(config_path, 'r') as f:
-    cfg_dict = yaml.safe_load(f)
+@dataclass
+class Config:
+    # ── Paths ──────────────────────────────────────────────────────────────────
+    raw_data_dir:   str = "/content/data/dailydialog_raw/ijcnlp_dailydialog"
+    cache_dir:      str = "/content/drive/MyDrive/data/cache"
+    output_dir:     str = "/content/drive/MyDrive/checkpoints/dialog_next_turn"
 
-CFG = dict_to_namespace(cfg_dict)
+    # ── Utterance encoder (DSE) ────────────────────────────────────────────────
+    encoder_model:  str = "aws-ai/dse-bert-base"   # HF model id
+    encoder_dim:    int = 768                        # DSE hidden size
+    freeze_encoder: bool = True                      # freeze DSE weights during training
+    #   set to False to fine-tune end-to-end (much slower, needs lower lr)
 
-# Determinar dispositivo
-if CFG.meta.device == "auto":
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-else:
-    DEVICE = torch.device(CFG.meta.device)
+    # ── Causal context transformer ─────────────────────────────────────────────
+    # Operates on sequences of utterance embeddings (not token sequences).
+    ctx_n_heads:    int = 8
+    ctx_n_layers:   int = 4
+    ctx_ffn_dim:    int = 2048
+    ctx_dropout:    float = 0.1
+    max_history:    int = 10          # max number of past turns to condition on
 
-# Crear directorios
-os.makedirs(CFG.logging.exp_dir, exist_ok=True)
-os.makedirs(os.path.join(CFG.logging.exp_dir, "/content/drive/MyDrive/metanet/v5/s2/checkpoints"), exist_ok=True)
+    # ── Projection head ────────────────────────────────────────────────────────
+    # Maps context vector → DSE embedding space for InfoNCE comparison.
+    proj_hidden_dim: int = 512        # set to None to use a single linear layer
 
-# Actualizar s1_ckpt si es null
-if CFG.training.s1_ckpt is None or CFG.training.s1_ckpt == "null":
-    # Default path a Stage 1
-    CFG.training.s1_ckpt = "/content/drive/MyDrive/metanet/v5/s1/checkpoints/epoch_best.pt"
+    # ── InfoNCE loss ───────────────────────────────────────────────────────────
+    temperature:    float = 0.07      # standard SimCSE / MoCo value
 
-print(f"Config loaded: seed={CFG.meta.seed}, device={DEVICE}")
-print(f"Stage 1 checkpoint: {CFG.training.s1_ckpt}")
+    # ── Training ───────────────────────────────────────────────────────────────
+    batch_size:     int = 64
+    num_epochs:     int = 20
+    lr:             float = 1e-4      # for the context transformer + proj head
+    encoder_lr:     float = 2e-5     # used only when freeze_encoder=False
+    warmup_steps:   int = 200
+    grad_clip:      float = 1.0
+    eval_every:     int = 1           # evaluate on val set every N epochs
+    save_every:     int = 2
+    seed:           int = 42
+
+    # ── Data ───────────────────────────────────────────────────────────────────
+    min_turns:      int = 3           # skip dialogs shorter than this
+    num_workers:    int = 2
+    max_seq_len:    int = 64          # max token length per utterance
+
+    # ── Misc ───────────────────────────────────────────────────────────────────
+    device:         str = "cuda"      # "cpu" if no GPU
+    fp16:           bool = True       # mixed precision (requires CUDA)
+    log_steps:      int = 50
+
+
+cfg = Config()
