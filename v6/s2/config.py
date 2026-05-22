@@ -1,59 +1,40 @@
-"""
-config.py — central configuration for the dialog next-turn prediction experiment.
-All paths, model hyper-params, and training settings live here.
-"""
-from dataclasses import dataclass, field
-from pathlib import Path
+# ── Create v6/s2/config.py ────────────────────────────────────────────────────
 
+config_code = '''
+import torch
+import os
 
-@dataclass
-class Config:
-    # ── Paths ──────────────────────────────────────────────────────────────────
-    raw_data_dir:   str = "/content/data/dailydialog_raw/ijcnlp_dailydialog"
-    cache_dir:      str = "/content/drive/MyDrive/data/cache"
-    output_dir:     str = "/content/drive/MyDrive/checkpoints/dialog_next_turn"
+# ── Paths ─────────────────────────────────────────────────────────────────────
+BASE        = os.environ.get("DAILYDIALOG_PATH",
+              "./data/dailydialog")
+CKPT_DIR    = os.environ.get("CKPT_DIR",
+              "./checkpoints")
 
-    # ── Utterance encoder (DSE) ────────────────────────────────────────────────
-    encoder_model:  str = "aws-ai/dse-bert-base"   # HF model id
-    encoder_dim:    int = 768                        # DSE hidden size
-    freeze_encoder: bool = True                      # freeze DSE weights during training
-    #   set to False to fine-tune end-to-end (much slower, needs lower lr)
+# ── Model ─────────────────────────────────────────────────────────────────────
+MAX_TURNS   = 6
+D_INPUT     = 768
+D_MODEL     = 512
+NHEAD       = 8
+NUM_LAYERS  = 4
+DIM_FF      = 1024
+DROPOUT     = 0.1
 
-    # ── Causal context transformer ─────────────────────────────────────────────
-    # Operates on sequences of utterance embeddings (not token sequences).
-    ctx_n_heads:    int = 8
-    ctx_n_layers:   int = 4
-    ctx_ffn_dim:    int = 2048
-    ctx_dropout:    float = 0.1
-    max_history:    int = 10          # max number of past turns to condition on
+# ── Training ──────────────────────────────────────────────────────────────────
+BATCH_SIZE  = 128
+EPOCHS      = 30
+LR          = 1e-4
+WEIGHT_DECAY= 1e-4
 
-    # ── Projection head ────────────────────────────────────────────────────────
-    # Maps context vector → DSE embedding space for InfoNCE comparison.
-    proj_hidden_dim: int = 512        # set to None to use a single linear layer
+# ── Device ────────────────────────────────────────────────────────────────────
+DEVICE      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── InfoNCE loss ───────────────────────────────────────────────────────────
-    temperature:    float = 0.07      # standard SimCSE / MoCo value
+# ── DMI encoder ───────────────────────────────────────────────────────────────
+DMI_CKPT    = os.environ.get("DMI_CKPT",
+              "./checkpoints/DMI_medium_model.pth")
+BERT_NAME   = "google/bert_uncased_L-8_H-768_A-12"
+'''
 
-    # ── Training ───────────────────────────────────────────────────────────────
-    batch_size:     int = 64
-    num_epochs:     int = 20
-    lr:             float = 1e-4      # for the context transformer + proj head
-    encoder_lr:     float = 2e-5     # used only when freeze_encoder=False
-    warmup_steps:   int = 200
-    grad_clip:      float = 1.0
-    eval_every:     int = 1           # evaluate on val set every N epochs
-    save_every:     int = 2
-    seed:           int = 42
-
-    # ── Data ───────────────────────────────────────────────────────────────────
-    min_turns:      int = 3           # skip dialogs shorter than this
-    num_workers:    int = 2
-    max_seq_len:    int = 64          # max token length per utterance
-
-    # ── Misc ───────────────────────────────────────────────────────────────────
-    device:         str = "cuda"      # "cpu" if no GPU
-    fp16:           bool = True       # mixed precision (requires CUDA)
-    log_steps:      int = 50
-
-
-cfg = Config()
+os.makedirs('v6/s2', exist_ok=True)
+with open('v6/s2/config.py', 'w') as f:
+    f.write(config_code)
+print("config.py written")
