@@ -149,6 +149,23 @@ class CovarianceLoss(torch.nn.Module):
 
 
 
+# v6/s2/losses.py — add combined loss
+
+class MSEInfoNCELoss(nn.Module):
+    def __init__(self, temperature=0.07, alpha=0.5):
+        super().__init__()
+        self.infonce = InfoNCELoss(temperature)
+        self.mse     = nn.MSELoss()
+        self.alpha   = alpha
+
+    def forward(self, pred, target):
+        return (self.alpha * self.infonce(pred, target) +
+                (1 - self.alpha) * self.mse(pred, target))
+
+
+
+
+
 
 
 # --------------------------------------------------------

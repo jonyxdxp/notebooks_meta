@@ -11,7 +11,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from config        import cfg
 from data.data     import make_dataloaders
 from cog_arch.dm   import DialogueJEPAPredictor
-from losses        import InfoNCELoss, recall_at_k, mean_reciprocal_rank
+from losses import InfoNCELoss
 from evaluate.eval import run_eval
 
 
@@ -25,7 +25,7 @@ def train(predictor, train_loader, valid_loader):
     optimizer = AdamW(predictor.parameters(),
                       lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=cfg.epochs)
-    criterion = nn.MSELoss()
+    criterion = InfoNCELoss(temperature=0.07)
     save_path = os.path.join(cfg.ckpt_dir, "jepa_predictor_best.pth")
 
     best_val  = float("inf")
