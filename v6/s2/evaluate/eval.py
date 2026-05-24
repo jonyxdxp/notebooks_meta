@@ -98,3 +98,29 @@ def run_eval(predictor, valid_ds, n_samples=1000, seed=42):
     print(f"  Random baseline:          0.1000")
 
     return {"mrr": mrr, "cos": cos}
+
+
+
+
+
+
+if __name__ == "__main__":
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    from config     import cfg
+    from data.data  import make_dataloaders
+    from cog_arch.dm import DialogueJEPAPredictor
+
+    # Load best checkpoint
+    predictor = DialogueJEPAPredictor().to(cfg.device)
+    ckpt = torch.load(
+        os.path.join(cfg.ckpt_dir, "jepa_predictor_best.pth"),
+        map_location=cfg.device, weights_only=False)
+    predictor.load_state_dict(ckpt["model_state_dict"])
+    predictor.eval()
+    print(f"Loaded epoch {ckpt['epoch']} | "
+          f"MSE {ckpt['val_mse']:.4f} | cos {ckpt['val_cos']:.4f}")
+
+    _, _, valid_ds = make_dataloaders()
+    run_eval(predictor, valid_ds)
