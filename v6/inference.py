@@ -75,8 +75,8 @@ print(f'Prior loaded  (σ_goal={goal_prior.get_sigma().item():.4f})')
 
 decoder = Decoder(
     vocab_size  = cfg.vocab_size if hasattr(cfg, 'vocab_size') else 30522,
-    hidden_size = D,
-    context_dim = D,
+    hidden_size = D,    # 768
+    context_dim = D,    # 768
 ).to(DEVICE)
 s3_ckpt = torch.load(S3_CKPT, map_location=DEVICE, weights_only=False)
 dec_key = 'decoder' if 'decoder' in s3_ckpt else 'model_state_dict'
