@@ -9,6 +9,10 @@ from config  import cfg
 from encoder import encode_single
 
 
+import pickle
+from pathlib import Path
+
+
 class JEPADialogueDataset(Dataset):
     def __init__(self, dialog_file, max_dialogs=None):
         self.samples = []
@@ -43,9 +47,21 @@ def collate_jepa(batch):
     return ctx, tgt, mask, lens
 
 
+
 def make_dataloaders():
-    train_ds = JEPADialogueDataset(f"{cfg.base}/dialogues_train.txt")
-    valid_ds = JEPADialogueDataset(f"{cfg.base}/dialogues_valid.txt")
+    cache_path = Path(cfg.base) / 'jepa_dataset_cache.pkl'
+
+    if cache_path.exists():
+        print('Loading dataset from cache...')
+        with open(cache_path, 'rb') as f:
+            train_ds, valid_ds = pickle.load(f)
+    else:
+        train_ds = JEPADialogueDataset(f"{cfg.base}/dialogues_train.txt")
+        valid_ds = JEPADialogueDataset(f"{cfg.base}/dialogues_valid.txt")
+        with open(cache_path, 'wb') as f:
+            pickle.dump((train_ds, valid_ds), f)
+        print('Dataset cached.')
+
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                               shuffle=True,  collate_fn=collate_jepa,
                               num_workers=2)

@@ -49,6 +49,7 @@ class SingleTurnDecoderNew(nn.Module):
             dropout=dropout, batch_first=True, norm_first=True)
         self.decoder      = nn.TransformerDecoder(dec_layer, num_layers=num_layers)
         self.out          = nn.Linear(hidden_size, vocab_size)
+        
 
     def forward(self, tgt_tokens, emb):
         B, T         = tgt_tokens.shape
@@ -62,5 +63,20 @@ class SingleTurnDecoderNew(nn.Module):
                                     tgt_mask=causal_mask,
                                     tgt_key_padding_mask=pad_mask)
         return self.out(out)
+    
+
+    @torch.no_grad()
+    def generate(self, prompt_ids, z_fused, max_new_tokens=30,
+                 temperature=1.0, top_k=50):
+        generated = prompt_ids
+        for _ in range(max_new_tokens):
+            logits = self(generated, z_fused)[:, -1, :]
+            if top_k:
+                v, _ = logits.topk(top_k)
+                logits[logits < v[:, -1:]] = -float('inf')
+            probs    = torch.softmax(logits / temperature, dim=-1)
+            next_tok = torch.multinomial(probs, 1)
+            generated = torch.cat([generated, next_tok], dim=1)
+        return generated
 
 Decoder = SingleTurnDecoderNew
