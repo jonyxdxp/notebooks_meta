@@ -1,364 +1,277 @@
 #!/usr/bin/env python3
 """
-Inference: Full pipeline proof — BJEPA Goal Prior v2
-Conditioning modes:
-  1. Oracle    — PoE(dynamics, Z_T_real)      upper bound
-  2. Reference — PoE(dynamics, S1(ref_text))  user-provided reference
-  3. Dynamics  — μ_dyn only                   no prior
-  4. Random    — N(0,I)                        lower bound
+v6/inference.py
+Full pipeline inference — BJEPA Goal Prior v6.
+
+Four conditioning modes (same as v5, now with 768-d):
+  oracle    : PoE(dynamics, Z_T_real)        upper bound
+  reference : PoE(dynamics, encode_single(text))  user-provided
+  dynamics  : μ_dyn only                     no prior
+  random    : N(0, I)                         lower bound
+
+Changes from v5 inference.py:
+  - All paths point to v6
+  - No mean_pool (BERT CLS token used directly)
+  - Predictor takes (B, max_turns, 768) not tokenised sequences
+  - DynamicsHead / LearnedGoalPrior live in v6/prior_encoder.py
+  - encode_single() imported from v6/s2/encoder.py
 """
 
 import sys
-import importlib.util
+import os
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 ROOT   = '/content/notebooks_meta'
-S2     = f'{ROOT}/v5/s2'
+V6     = f'{ROOT}/v6'
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 sys.path.insert(0, ROOT)
+sys.path.insert(0, V6)
 
-from v5.s1.cog_arch.encoder import Encoder
-from v5.s2.cog_arch.dm import DM
-from v5.s3.cog_arch.decoder import Decoder
-from v5.s2.config import CFG
+from v6.s2.config       import cfg
+from v6.s2.cog_arch.dm  import DialogueJEPAPredictor
+from v6.s2.encoder      import encode_single          # BERT/DMI 768-d
+from v6.prior_encoder   import DynamicsHead, LearnedGoalPrior
+from v6.s3.cog_arch.decoder import Decoder            # adapt to actual class name
 
-def _load_module(name, filepath):
-    spec = importlib.util.spec_from_file_location(name, filepath)
-    mod  = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-_dataset    = _load_module('data.dataset',    f'{S2}/data/dataset.py')
-_dataloader = _load_module('data.dataloader', f'{S2}/data/dataloader.py')
-
-get_stage2_dataloaders = _dataloader.get_stage2_dataloaders
-tokenizer              = _dataset.tokenizer
+# v6 data loader (for batch-level eval)
+from v6.s2.data.data import make_dataloaders
 
 print(f'Device: {DEVICE}')
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Load S2 predictor ──────────────────────────────────────────────────────────
 
-def mean_pool(hidden, mask):
-    mask_f = mask.unsqueeze(-1).float()
-    return (hidden * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
+S2_CKPT    = os.environ.get('S2_CKPT',    '/content/drive/MyDrive/metanet/v6/s2/best.pt')
+PRIOR_CKPT = os.environ.get('PRIOR_CKPT', '/content/drive/MyDrive/metanet/v6/prior/best.pt')
+S3_CKPT    = os.environ.get('S3_CKPT',    '/content/drive/MyDrive/metanet/v6/s3/best.pt')
 
-# ── Prior components — must match train_prior_v2.py exactly ──────────────────
+predictor = DialogueJEPAPredictor().to(DEVICE)
+s2_ckpt   = torch.load(S2_CKPT, map_location=DEVICE, weights_only=False)
+state_key = 'predictor' if 'predictor' in s2_ckpt else 'model_state_dict'
+predictor.load_state_dict(s2_ckpt[state_key])
+predictor.eval()
+for p in predictor.parameters(): p.requires_grad_(False)
+print('S2 predictor loaded.')
 
-class DynamicsHead(nn.Module):
-    def __init__(self, hidden_dim=256):
-        super().__init__()
-        self.mu_head     = nn.Linear(hidden_dim, hidden_dim)
-        self.logvar_head = nn.Linear(hidden_dim, hidden_dim)
+# ── Load prior components ──────────────────────────────────────────────────────
 
-    def forward(self, z_pred):
-        mu     = self.mu_head(z_pred)
-        logvar = self.logvar_head(z_pred).clamp(-10, 2)
-        return mu, logvar
+D = cfg.d_input   # 768
 
-
-class LearnedGoalPrior(nn.Module):
-    def __init__(self, z_dim=256):
-        super().__init__()
-        # ✅ scalar tensor [] to match checkpoint — was torch.zeros(1)
-        self.log_sigma_goal = nn.Parameter(torch.zeros([]))
-        self.z_dim = z_dim
-        
-
-    def get_sigma(self):
-        return F.softplus(self.log_sigma_goal) + 1e-4
-
-    def forward(self, z_eta):
-        sigma = self.get_sigma()
-        sig   = sigma.expand(z_eta.size(0), self.z_dim)
-        return z_eta, sig
-
-    def product_of_experts(self, mu_dyn, logvar_dyn, z_eta):
-        """
-        Hard PoE fusion:
-          dynamics: N(μ_dyn, exp(logvar_dyn))
-          prior:    N(z_eta, σ_goal²)
-        Returns posterior mean.
-        """
-        mu_prior, sig_prior = self.forward(z_eta)
-        prec_dyn   = logvar_dyn.exp().reciprocal()
-        prec_prior = sig_prior.pow(2).reciprocal()
-        prec_post  = prec_dyn + prec_prior
-        mu_post    = (prec_dyn * mu_dyn + prec_prior * mu_prior) / prec_post
-        return mu_post
-
-# ── Load all models ───────────────────────────────────────────────────────────
-
-D = CFG.model.hidden_size   # 256
-
-# S1 encoder
-s1_encoder = Encoder(
-    vocab_size  = CFG.model.vocab_size,
-    hidden_size = D,
-    num_heads   = CFG.model.num_heads,
-    num_layers  = CFG.model.num_layers,
-    max_seq_len = CFG.model.max_seq_len,
-).to(DEVICE)
-s1_ckpt = torch.load(CFG.training.s1_ckpt, map_location=DEVICE, weights_only=False)
-s1_encoder.load_state_dict(s1_ckpt['context_encoder'])
-s1_encoder.eval()
-for p in s1_encoder.parameters(): p.requires_grad = False
-print('S1 loaded.')
-
-# S2 predictor
-s2_predictor = DM(
-    num_frames  = CFG.model.max_seq_len,
-    depth       = CFG.model.pred_num_layers,
-    heads       = CFG.model.pred_num_heads,
-    mlp_dim     = CFG.model.pred_hidden_size * 4,
-    input_dim   = CFG.model.dstc,
-    hidden_dim  = CFG.model.pred_hidden_size,
-    output_dim  = CFG.model.dstc,
-    dim_head    = 64, dropout=0.0, emb_dropout=0.0,
-).to(DEVICE)
-s2_ckpt = torch.load(
-    Path(CFG.logging.exp_dir) / 'best.pt',
-    map_location=DEVICE, weights_only=False
-)
-s2_predictor.load_state_dict(s2_ckpt['predictor'])
-s2_predictor.eval()
-for p in s2_predictor.parameters(): p.requires_grad = False
-print('S2 loaded.')
-
-# Prior v2 — dynamics head + learned goal prior
 dynamics_head = DynamicsHead(hidden_dim=D).to(DEVICE)
 goal_prior    = LearnedGoalPrior(z_dim=D).to(DEVICE)
 
-prior_ckpt = torch.load(
-    '/content/drive/MyDrive/metanet/v5/prior_v2/best.pt',
-    map_location=DEVICE, weights_only=False
-)
+prior_ckpt = torch.load(PRIOR_CKPT, map_location=DEVICE, weights_only=False)
 dynamics_head.load_state_dict(prior_ckpt['dynamics_head'])
 goal_prior.load_state_dict(prior_ckpt['goal_prior'])
 dynamics_head.eval(); goal_prior.eval()
-for p in dynamics_head.parameters(): p.requires_grad = False
-for p in goal_prior.parameters():    p.requires_grad = False
-print(f'Prior v2 loaded (σ_goal={goal_prior.get_sigma().item():.4f})')
+for p in dynamics_head.parameters(): p.requires_grad_(False)
+for p in goal_prior.parameters():    p.requires_grad_(False)
+print(f'Prior loaded  (σ_goal={goal_prior.get_sigma().item():.4f})')
 
-# S3 decoder
+# ── Load S3 decoder ────────────────────────────────────────────────────────────
+
 decoder = Decoder(
-    vocab_size   = CFG.model.vocab_size,
-    hidden_size  = 256,
-    num_heads    = 4,
-    num_layers   = 4,
-    max_seq_len  = CFG.model.max_seq_len,
-    context_dim  = D,
+    vocab_size  = cfg.vocab_size if hasattr(cfg, 'vocab_size') else 30522,
+    hidden_size = D,
+    context_dim = D,
 ).to(DEVICE)
-s3_ckpt = torch.load(
-    '/content/drive/MyDrive/metanet/v5/s3/checkpoints/best.pt',
-    map_location=DEVICE, weights_only=False
-)
-decoder.load_state_dict(s3_ckpt['decoder'])
+s3_ckpt = torch.load(S3_CKPT, map_location=DEVICE, weights_only=False)
+dec_key = 'decoder' if 'decoder' in s3_ckpt else 'model_state_dict'
+decoder.load_state_dict(s3_ckpt[dec_key])
 decoder.eval()
-for p in decoder.parameters(): p.requires_grad = False
-print(f'S3 loaded (val_ppl={s3_ckpt["val_ppl"]:.1f})')
+for p in decoder.parameters(): p.requires_grad_(False)
+val_ppl = s3_ckpt.get('val_ppl', '?')
+print(f'S3 decoder loaded  (val_ppl={val_ppl})')
 
-# ── Dataloader ────────────────────────────────────────────────────────────────
-
-_, val_loader = get_stage2_dataloaders(cfg_obj=CFG, tokenizer=tokenizer)
-
-# ── Encode a reference text ───────────────────────────────────────────────────
+# ── Encode a reference text ────────────────────────────────────────────────────
 
 @torch.no_grad()
-def encode_reference(text, batch_size):
-    """Encode a reference turn text with frozen S1 encoder."""
-    enc   = tokenizer(
-        text, return_tensors='pt',
-        max_length=128, truncation=True, padding='max_length'
-    ).to(DEVICE)
-    # ✅ pass input_ids positionally, attention_mask as kwarg
-    h     = s1_encoder(enc['input_ids'], attention_mask=enc['attention_mask'])
-    if isinstance(h, tuple): h = h[0]
-    z_ref = mean_pool(h, enc['attention_mask'])   # (1, D)
-    return z_ref.expand(batch_size, -1)           # (B, D)
+def encode_reference(text: str, batch_size: int) -> torch.Tensor:
+    """
+    Encode free-form reference text with the frozen BERT/DMI encoder.
+    Returns (B, 768) — same vector repeated across the batch.
+    """
+    z = encode_single(text)          # (768,) CPU — uses v6/s2/encoder.py
+    return z.unsqueeze(0).expand(batch_size, -1).to(DEVICE)  # (B, 768)
 
-# ── Inference ─────────────────────────────────────────────────────────────────
+# ── Build context tensor from a list of strings ────────────────────────────────
 
 @torch.no_grad()
-def run_inference(batch, n_samples=3, max_new_tokens=30,
-                  temperature=0.8, top_k=50,
-                  reference_text=None):
+def build_context(utterances: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Runs four conditioning modes on the same batch:
-      oracle    : PoE(dynamics, Z_T_real)
-      reference : PoE(dynamics, S1(reference_text))  if provided
-      dynamics  : μ_dyn only — no prior
-      random    : N(0,I)
+    Embed a dialogue history and return (ctx, mask) ready for the predictor.
+
+    ctx  : (1, max_turns, 768)
+    mask : (1, max_turns)  True = padding
     """
-    ctx_ids  = batch['input_ids_a'][:n_samples].to(DEVICE)
-    ctx_mask = batch['attention_mask_a'][:n_samples].to(DEVICE)
-    tgt_ids  = batch['input_ids_b'][:n_samples].to(DEVICE)
-    tgt_mask = batch['attention_mask_b'][:n_samples].to(DEVICE)
-    B        = ctx_ids.size(0)
+    embs = [encode_single(u) for u in utterances]
+    n    = min(len(embs), cfg.max_turns)
+    ctx  = torch.zeros(1, cfg.max_turns, 768)
+    ctx[0, :n] = torch.stack(embs[:n])
+    mask = torch.arange(cfg.max_turns).unsqueeze(0) >= n   # (1, max_turns)
+    return ctx.to(DEVICE), mask.to(DEVICE)
 
-    # Encode
-    ctx_h = s1_encoder(ctx_ids, attention_mask=ctx_mask)
-    if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
-    tgt_h = s1_encoder(tgt_ids, attention_mask=tgt_mask)
-    if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
+# ── Core inference step ────────────────────────────────────────────────────────
 
-    # Representations
-    z_pred   = s2_predictor(ctx_h, ctx_h)
-    z_C_pred = mean_pool(z_pred, ctx_mask)    # (B, D)
-    Z_T_real = mean_pool(tgt_h,  tgt_mask)   # (B, D)
+@torch.no_grad()
+def get_goal_embedding(
+    ctx:            torch.Tensor,       # (B, max_turns, 768)
+    mask:           torch.Tensor,       # (B, max_turns) bool
+    mode:           str = 'dynamics',   # oracle | reference | dynamics | random
+    z_T_real:       torch.Tensor = None,  # (B, 768) required for oracle
+    reference_text: str = None,           # required for reference mode
+) -> torch.Tensor:
+    """
+    Returns the goal embedding (B, 768) for the chosen conditioning mode.
+    This is what gets passed to the S3 decoder.
+    """
+    # S2 → dynamics distribution
+    z_pred             = predictor(ctx, padding_mask=mask)       # (B, 768)
+    mu_dyn, logvar_dyn = dynamics_head(z_pred)
 
-    # Dynamics distribution
-    mu_dyn, logvar_dyn = dynamics_head(z_C_pred)
+    B = ctx.size(0)
 
-    # Conditioning vectors
-    z_oracle   = goal_prior.product_of_experts(mu_dyn, logvar_dyn, Z_T_real)
-    z_dynamics = mu_dyn
-    z_random   = torch.randn_like(Z_T_real)
+    if mode == 'oracle':
+        assert z_T_real is not None, "oracle mode needs z_T_real"
+        return goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_T_real)
 
-    modes = [
-        ('oracle',   z_oracle),
-        ('dynamics', z_dynamics),
-        ('random',   z_random),
-    ]
+    elif mode == 'reference':
+        assert reference_text is not None, "reference mode needs reference_text"
+        z_ref = encode_reference(reference_text, B)
+        return goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_ref)
 
+    elif mode == 'dynamics':
+        return mu_dyn
+
+    elif mode == 'random':
+        return torch.randn_like(mu_dyn)
+
+    else:
+        raise ValueError(f"Unknown mode '{mode}'. "
+                         "Choose: oracle | reference | dynamics | random")
+
+# ── Batch-level qualitative eval ───────────────────────────────────────────────
+
+@torch.no_grad()
+def run_batch_inference(batch, n_samples=3, reference_text=None):
+    """
+    Run all four modes on one dataloader batch.
+    batch: (ctx, tgt, mask, lens)  from make_dataloaders()
+    """
+    ctx, tgt, mask, lens = batch
+    ctx  = ctx[:n_samples].to(DEVICE)
+    tgt  = tgt[:n_samples].to(DEVICE)
+    mask = mask[:n_samples].to(DEVICE)
+    B    = ctx.size(0)
+
+    z_pred             = predictor(ctx, padding_mask=mask)
+    mu_dyn, logvar_dyn = dynamics_head(z_pred)
+
+    modes = {
+        'oracle':   goal_prior.product_of_experts(mu_dyn, logvar_dyn, tgt),
+        'dynamics': mu_dyn,
+        'random':   torch.randn_like(mu_dyn),
+    }
     if reference_text is not None:
         z_ref = encode_reference(reference_text, B)
-        z_poe_ref = goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_ref)
-        modes.insert(1, ('reference', z_poe_ref))
+        modes['reference'] = goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_ref)
 
-    # Generate
-    prompt  = torch.full((B, 1), 101, dtype=torch.long, device=DEVICE)
-    results = {'context': ctx_ids, 'target': tgt_ids}
-
-    for mode, z_cond in modes:
+    results = {}
+    for mode_name, z_goal in modes.items():
         generated = decoder.generate(
-            prompt_ids     = prompt,
-            z_fused        = z_cond,
-            max_new_tokens = max_new_tokens,
-            temperature    = temperature,
-            top_k          = top_k,
+            prompt_ids     = torch.full((B, 1), 101, dtype=torch.long, device=DEVICE),
+            z_fused        = z_goal,
+            max_new_tokens = 30,
+            temperature    = 0.8,
+            top_k          = 50,
         )
-        results[mode] = generated
+        results[mode_name] = generated
 
+    results['target'] = tgt
     return results
 
-# ── Decode ────────────────────────────────────────────────────────────────────
-
-def decode(token_ids):
-    return tokenizer.decode(token_ids.tolist(), skip_special_tokens=True)
-
-# ── Qualitative eval ──────────────────────────────────────────────────────────
-
-REFERENCE_TEXT = "i understand what you mean, that makes sense."
-N_BATCHES      = 3
-N_SAMPLES      = 3
-
-print(f'\n{"="*70}')
-print(f'  Full Pipeline Inference — Goal Prior v2')
-print(f'  Reference: "{REFERENCE_TEXT}"')
-print(f'{"="*70}\n')
-
-for batch_idx, batch in enumerate(val_loader):
-    if batch_idx >= N_BATCHES: break
-
-    results = run_inference(
-        batch,
-        n_samples      = N_SAMPLES,
-        reference_text = REFERENCE_TEXT,
-    )
-
-    print(f'─── Batch {batch_idx+1} ──────────────────────────────────────────')
-
-    for i in range(N_SAMPLES):
-        print(f'\n  Sample {i+1}:')
-        print(f'  Context   : {decode(results["context"][i])[:80]}')
-        print(f'  Target    : {decode(results["target"][i])[:80]}')
-        print(f'  Oracle    : {decode(results["oracle"][i])[:80]}')
-        print(f'  Reference : {decode(results["reference"][i])[:80]}')
-        print(f'  Dynamics  : {decode(results["dynamics"][i])[:80]}')
-        print(f'  Random    : {decode(results["random"][i])[:80]}')
-    print()
-
-# ── Quantitative eval ─────────────────────────────────────────────────────────
-
-print(f'\n{"="*70}')
-print('  Quantitative: cosine similarity to Z_T_real')
-print(f'{"="*70}\n')
-
-
-
+# ── Quantitative eval ──────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def eval_similarity(loader, n_batches=10, reference_text=None):
-    sims = {'oracle': [], 'reference': [], 'dynamics': [], 'random': []}
+def eval_similarity(loader, n_batches=10, reference_text=None) -> dict:
+    """
+    Cosine similarity between each conditioning mode's output and Z_T_real.
+    Higher = closer to the true next turn in embedding space.
+    """
+    sims = {k: [] for k in ['oracle', 'reference', 'dynamics', 'random']}
 
-    for batch_idx, batch in enumerate(loader):
-        if batch_idx >= n_batches: break
+    for i, batch in enumerate(loader):
+        if i >= n_batches:
+            break
+        ctx, tgt, mask, lens = batch
+        ctx  = ctx.to(DEVICE)
+        tgt  = tgt.to(DEVICE)
+        mask = mask.to(DEVICE)
+        B    = ctx.size(0)
 
-        ctx_ids  = batch['input_ids_a'].to(DEVICE)
-        ctx_mask = batch['attention_mask_a'].to(DEVICE)
-        tgt_ids  = batch['input_ids_b'].to(DEVICE)
-        tgt_mask = batch['attention_mask_b'].to(DEVICE)
-        B        = ctx_ids.size(0)
+        z_pred             = predictor(ctx, padding_mask=mask)
+        mu_dyn, logvar_dyn = dynamics_head(z_pred)
 
-        ctx_h = s1_encoder(ctx_ids, attention_mask=ctx_mask)
-        if isinstance(ctx_h, tuple): ctx_h = ctx_h[0]
-        tgt_h = s1_encoder(tgt_ids, attention_mask=tgt_mask)
-        if isinstance(tgt_h, tuple): tgt_h = tgt_h[0]
+        T_norm = F.normalize(tgt, dim=-1)
 
-        z_pred   = s2_predictor(ctx_h, ctx_h)
-        z_C_pred = mean_pool(z_pred, ctx_mask)
-        Z_T_real = mean_pool(tgt_h,  tgt_mask)
-
-        mu_dyn, logvar_dyn = dynamics_head(z_C_pred)
-
-        z_oracle   = goal_prior.product_of_experts(mu_dyn, logvar_dyn, Z_T_real)
-        z_dynamics = mu_dyn
-        z_random   = torch.randn_like(Z_T_real)
-
-        # ← ADD REFERENCE MODE HERE
-        z_reference = None
+        candidates = {
+            'oracle':   goal_prior.product_of_experts(mu_dyn, logvar_dyn, tgt),
+            'dynamics': mu_dyn,
+            'random':   torch.randn_like(mu_dyn),
+        }
         if reference_text is not None:
             z_ref = encode_reference(reference_text, B)
-            z_reference = goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_ref)
+            candidates['reference'] = goal_prior.product_of_experts(
+                mu_dyn, logvar_dyn, z_ref)
 
-        Z_norm = F.normalize(Z_T_real, dim=-1)
-        
-        modes = [
-            ('oracle',   z_oracle),
-            ('dynamics', z_dynamics),
-            ('random',   z_random),
-        ]
-        if z_reference is not None:
-            modes.insert(1, ('reference', z_reference))
-        
-        for mode, z in modes:
-            sim = F.cosine_similarity(F.normalize(z, dim=-1), Z_norm).mean().item()
-            sims[mode].append(sim)
+        for k, z in candidates.items():
+            sims[k].append(
+                F.cosine_similarity(F.normalize(z, dim=-1), T_norm).mean().item()
+            )
 
-    return {k: sum(v)/len(v) for k, v in sims.items()}
+    return {k: sum(v) / max(len(v), 1) for k, v in sims.items()}
 
-# Update the call:
-sims = eval_similarity(val_loader, reference_text=REFERENCE_TEXT)
+# ── Main ───────────────────────────────────────────────────────────────────────
 
-# And update the output section:
-print(f'  Avg cosine similarity to Z_T_real:\n')
-print(f'  Oracle    : {sims["oracle"]:.4f}   upper bound (Z_T_real itself)')
-print(f'  Reference : {sims.get("reference", 0):.4f}   PoE with learned prior')
-print(f'  Dynamics  : {sims["dynamics"]:.4f}   S2 only, no prior')
-print(f'  Random    : {sims["random"]:.4f}   lower bound')
+if __name__ == '__main__':
+    REFERENCE = "i understand what you mean, that makes sense."
 
-gap_oracle    = sims['oracle'] - sims['random']
-if 'reference' in sims:
-    gap_reference = sims['reference'] - sims['random']
-    print(f'\n  Reference recovery : {gap_reference/gap_oracle*100:.1f}%  of oracle gap')
-gap_dynamics = sims['dynamics'] - sims['random']
-print(f'  Dynamics recovery  : {gap_dynamics/gap_oracle*100:.1f}%  of oracle gap')
-print(f'  Oracle recovery    : {gap_oracle/gap_oracle*100:.1f}%  (ceiling)')
-print(f'  σ_goal             : {goal_prior.get_sigma().item():.4f}')
-print(f'\n{"="*70}')
+    _, val_loader = make_dataloaders()
+
+    # ── qualitative ──
+    print(f'\n{"="*70}')
+    print(f'  v6 Inference — BJEPA Goal Prior  (σ_goal={goal_prior.get_sigma().item():.4f})')
+    print(f'  Reference: "{REFERENCE}"')
+    print(f'{"="*70}\n')
+
+    for bi, batch in enumerate(val_loader):
+        if bi >= 3:
+            break
+        results = run_batch_inference(batch, n_samples=3,
+                                       reference_text=REFERENCE)
+        print(f'─── Batch {bi+1} ───')
+        # (tokenizer decode left to the caller since we don't import it here)
+        for mode in ['oracle', 'reference', 'dynamics', 'random']:
+            if mode in results:
+                print(f'  {mode:10s}: shape={results[mode].shape}')
+
+    # ── quantitative ──
+    sims = eval_similarity(val_loader, n_batches=10, reference_text=REFERENCE)
+
+    print(f'\n{"="*70}')
+    print('  Cosine similarity to Z_T_real:')
+    print(f'{"="*70}')
+    for k, v in sorted(sims.items(), key=lambda x: -x[1]):
+        print(f'  {k:12s} : {v:.4f}')
+
+    gap_oracle   = sims['oracle']   - sims['random']
+    gap_dynamics = sims['dynamics'] - sims['random']
+    print(f'\n  Dynamics recovery : {gap_dynamics/gap_oracle*100:.1f}% of oracle gap')
+    if 'reference' in sims:
+        gap_ref = sims['reference'] - sims['random']
+        print(f'  Reference recovery: {gap_ref/gap_oracle*100:.1f}% of oracle gap')
+    print(f'  σ_goal : {goal_prior.get_sigma().item():.4f}')
+    print(f'{"="*70}')

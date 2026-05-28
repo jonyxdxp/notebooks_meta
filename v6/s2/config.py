@@ -22,6 +22,7 @@ LR           = 1e-4
 WEIGHT_DECAY = 1e-4
 DEVICE       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 cfg = SimpleNamespace(
     base=BASE, ckpt_dir=CKPT_DIR, dmi_ckpt=DMI_CKPT, bert_name=BERT_NAME,
     max_turns=MAX_TURNS, d_input=D_INPUT, d_model=D_MODEL, nhead=NHEAD,
