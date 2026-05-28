@@ -73,7 +73,24 @@ print(f'Prior loaded  (σ_goal={goal_prior.get_sigma().item():.4f})')
 
 # ── Load S3 decoder ────────────────────────────────────────────────────────────
 
+s3_ckpt = torch.load(S3_CKPT, map_location=DEVICE, weights_only=False)
+dec_key  = 'decoder' if 'decoder' in s3_ckpt else 'model_state_dict'
+dec_sd   = s3_ckpt[dec_key]
 
+_hidden_size = dec_sd['tok_emb.weight'].shape[1]
+_context_dim = dec_sd['mem_proj.weight'].shape[1]
+_vocab_size  = dec_sd['tok_emb.weight'].shape[0]
+
+decoder = Decoder(
+    vocab_size  = _vocab_size,
+    hidden_size = _hidden_size,
+    context_dim = _context_dim,
+).to(DEVICE)
+decoder.load_state_dict(dec_sd)
+decoder.eval()
+for p in decoder.parameters(): p.requires_grad_(False)
+val_ppl = s3_ckpt.get('val_ppl', '?')
+print(f'S3 decoder loaded  (val_ppl={val_ppl})')
 
 # ── Encode a reference text ────────────────────────────────────────────────────
 
