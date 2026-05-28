@@ -103,7 +103,7 @@ def extract_representations(predictor, loader, device):
     return torch.cat(all_z_C), torch.cat(all_z_T)
 
 
-train_loader, valid_loader = make_dataloaders()
+train_loader, valid_loader, _ = make_dataloaders()
 print(f'Train batches: {len(train_loader)} | Val batches: {len(valid_loader)}')
 
 cache_train = SAVE_DIR / 'reps_train.pt'
