@@ -35,7 +35,7 @@ from v6.s2.config       import cfg
 from v6.s2.cog_arch.dm  import DialogueJEPAPredictor
 from v6.s2.encoder      import encode_single          # BERT/DMI 768-d
 from v6.prior_encoder   import DynamicsHead, LearnedGoalPrior
-from v6.s3.cog_arch.decoder import Decoder            # adapt to actual class name
+from v6.s3.cog_arch.decoder import SingleTurnDecoderNew as Decoder
 
 # v6 data loader (for batch-level eval)
 from v6.s2.data.data import make_dataloaders
