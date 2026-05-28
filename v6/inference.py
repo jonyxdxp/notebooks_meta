@@ -228,7 +228,7 @@ def eval_similarity(loader, n_batches=10, reference_text=None) -> dict:
 if __name__ == '__main__':
     REFERENCE = "i understand what you mean, that makes sense."
 
-    _, val_loader = make_dataloaders()
+    _, val_loader, _ = make_dataloaders()
 
     # ── qualitative ──
     print(f'\n{"="*70}')
