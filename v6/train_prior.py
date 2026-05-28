@@ -54,7 +54,7 @@ print(f'Hidden dim (d_input): {cfg.d_input}')   # should print 768
 
 S2_CKPT = os.environ.get(
     'S2_CKPT',
-    '/content/drive/MyDrive/metanet/v6/s2/best.pt'
+    '/content/drive/MyDrive/data/dmi_checkpoints/jepa_predictor_best.pth'
 )
 
 predictor = DialogueJEPAPredictor().to(DEVICE)
