@@ -73,7 +73,7 @@ class SingleTurnDecoderNew(nn.Module):
         generated = prompt_ids
         for _ in range(max_new_tokens):
             logits = self(generated, z_fused)[:, -1, :]
-        
+
         # penalise tokens already generated
         if repetition_penalty != 1.0:
             for b in range(generated.size(0)):
@@ -83,9 +83,11 @@ class SingleTurnDecoderNew(nn.Module):
         if top_k:
             v, _ = logits.topk(top_k)
             logits[logits < v[:, -1:]] = -float('inf')
+
         probs    = torch.softmax(logits / temperature, dim=-1)
         next_tok = torch.multinomial(probs, 1)
         generated = torch.cat([generated, next_tok], dim=1)
+
         return generated
     
 
