@@ -65,18 +65,30 @@ class SingleTurnDecoderNew(nn.Module):
         return self.out(out)
     
 
+
+
     @torch.no_grad()
     def generate(self, prompt_ids, z_fused, max_new_tokens=30,
-                 temperature=1.0, top_k=50):
+             temperature=1.0, top_k=50, repetition_penalty=1.3):
         generated = prompt_ids
         for _ in range(max_new_tokens):
             logits = self(generated, z_fused)[:, -1, :]
-            if top_k:
-                v, _ = logits.topk(top_k)
-                logits[logits < v[:, -1:]] = -float('inf')
-            probs    = torch.softmax(logits / temperature, dim=-1)
-            next_tok = torch.multinomial(probs, 1)
-            generated = torch.cat([generated, next_tok], dim=1)
+        
+        # penalise tokens already generated
+        if repetition_penalty != 1.0:
+            for b in range(generated.size(0)):
+                for token_id in generated[b].unique():
+                    logits[b, token_id] /= repetition_penalty
+
+        if top_k:
+            v, _ = logits.topk(top_k)
+            logits[logits < v[:, -1:]] = -float('inf')
+        probs    = torch.softmax(logits / temperature, dim=-1)
+        next_tok = torch.multinomial(probs, 1)
+        generated = torch.cat([generated, next_tok], dim=1)
         return generated
+    
+
+            
 
 Decoder = SingleTurnDecoderNew
