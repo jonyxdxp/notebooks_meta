@@ -163,10 +163,6 @@ def get_goal_embedding(
 
 @torch.no_grad()
 def run_batch_inference(batch, n_samples=3, reference_text=None):
-    """
-    Run all four modes on one dataloader batch.
-    batch: (ctx, tgt, mask, lens)  from make_dataloaders()
-    """
     ctx, tgt, mask, lens = batch
     ctx  = ctx[:n_samples].to(DEVICE)
     tgt  = tgt[:n_samples].to(DEVICE)
@@ -176,27 +172,25 @@ def run_batch_inference(batch, n_samples=3, reference_text=None):
     z_pred             = predictor(ctx, padding_mask=mask)
     mu_dyn, logvar_dyn = dynamics_head(z_pred)
 
-    modes = {
-        'oracle':   goal_prior.product_of_experts(mu_dyn, logvar_dyn, tgt),
-        'dynamics': mu_dyn,
-        'random':   torch.randn_like(mu_dyn),
+    prompt = torch.full((B, 1), BOS_ID, dtype=torch.long, device=DEVICE)
+
+    results = {
+        'oracle'  : decoder.generate(prompt,
+                        goal_prior.product_of_experts(mu_dyn, logvar_dyn, tgt),
+                        max_new_tokens=30, temperature=0.8, top_k=50),
+        'dynamics': decoder.generate(prompt, mu_dyn,
+                        max_new_tokens=30, temperature=0.8, top_k=50),
+        'random'  : decoder.generate(prompt, torch.randn_like(mu_dyn),
+                        max_new_tokens=30, temperature=0.8, top_k=50),
     }
+
     if reference_text is not None:
         z_ref = encode_reference(reference_text, B)
-        modes['reference'] = goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_ref)
+        results['reference'] = decoder.generate(
+            prompt,
+            goal_prior.product_of_experts(mu_dyn, logvar_dyn, z_ref),
+            max_new_tokens=30, temperature=0.8, top_k=50)
 
-    results = {}
-    for mode_name, z_goal in modes.items():
-        generated = decoder.generate(
-            prompt_ids     = torch.full((B, 1), 101, dtype=torch.long, device=DEVICE),
-            z_fused        = z_goal,
-            max_new_tokens = 30,
-            temperature    = 0.8,
-            top_k          = 50,
-        )
-        results[mode_name] = generated
-
-    results['target'] = tgt
     return results
 
 # ── Quantitative eval ──────────────────────────────────────────────────────────
