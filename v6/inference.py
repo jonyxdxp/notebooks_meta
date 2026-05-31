@@ -45,7 +45,7 @@ print(f'Device: {DEVICE}')
 # ── Load S2 predictor ──────────────────────────────────────────────────────────
 
 S2_CKPT    = os.environ.get('S2_CKPT',    '/content/drive/MyDrive/data/dmi_checkpoints/jepa_predictor_best.pth')
-PRIOR_CKPT = os.environ.get('PRIOR_CKPT', '/content/drive/MyDrive/metanet/v6/prior/best.pt')
+PRIOR_CKPT = os.environ.get('PRIOR_CKPT', '/content/drive/MyDrive/data/dmi_checkpoints/best.pt')
 S3_CKPT    = os.environ.get('S3_CKPT',    '/content/drive/MyDrive/data/dmi_checkpoints/decoder_SINGLE_best.pth')
 
 predictor = DialogueJEPAPredictor().to(DEVICE)
