@@ -1,431 +1,153 @@
 
-# ── Cell 3: Imports ───────────────────────────────────────────────────────────
 
-import os           # <-- AGREGAR ESTA LÍNEA
-import glob         # <-- AGREGAR ESTA LÍNEA TAMBIÉN
+# from https://github.com/ruizhaoz/MOML/blob/main/main.py
 
-import copy
-import sys
-import typing
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import AdamW
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 
 
 
-sys.path.insert(0, '/content/notebooks_meta/v5/s1')
 
-from cog_arch.encoder import Encoder
-from losses import BCS   # BCS kept as optional alternative
 
 
 
-from data.dataloader import get_jepa_dataloaders
-from data.dataset import VOCAB_SIZE, tokenizer
+from utils_methods import *
 
+# Dataset initialization
+# You can change different dataset for CIFAR100 and miniImageNet
+# When using CIFAR100 and miniImageNet, you also need to change rule='way'
+# To replcate the results, number of task n_task and model_name need to change accordingly
+data_path = '/home/rzhu/code/MOMLclean/MNIST1000_clean'  # The folder to save Data & Model MNIST1000_v1_new
+rule = 'mnist_rotations_flips_crop_scale'
+seed = 17
+n_task = 1000
+data_obj = DatasetObject(dataset='mnist', seed=seed, n_task=n_task, rule=rule, data_path=data_path)
+model_name = 'mnist_2NN'  # Model type
 
+###
+# Common hyperparameters
+weight_decay = 1e-4
+batch_size = 10
+suffix = model_name
+lr_decay_per_round = 1
+sch_step = 1
+sch_gamma = 1
 
+# Model function
+model_func = lambda: combined_model(model_name)
+init_model = model_func()
 
-
-# IMPORTANTE: Importar config PRIMERO para definir CFG y DEVICE
-import config
-from config import CFG, DEVICE
-
-
-
-
-# ── Cell 9: Build dataloaders ─────────────────────────────────────────────────
-
-train_loader, val_loader = get_jepa_dataloaders(
-    cfg_obj    = CFG,
-    tokenizer  = tokenizer,
-)
-
-print(f"Train batches : {len(train_loader)}  |  Val batches : {len(val_loader)}")
-
-
-
-
-
-
-
-# ── Cell 10: Models ───────────────────────────────────────────────────────────
-
-context_encoder = Encoder(
-    vocab_size   = VOCAB_SIZE,
-    hidden_size  = CFG.hidden_size,
-    num_heads    = CFG.num_heads,
-    num_layers   = CFG.num_layers,
-    max_seq_len  = CFG.max_seq_len,
-).to(DEVICE)
-
-target_encoder = copy.deepcopy(context_encoder).to(DEVICE)
-for p in target_encoder.parameters():
-    p.requires_grad = False   # updated only via EMA
-
-print(f"Params (context encoder) : {sum(p.numel() for p in context_encoder.parameters()):,}")
-
-
-
-
-
-
-
-
-# ── Cell 11: Loss / optimizer / scheduler ────────────────────────────────────
-
-# loss_fn = VICRegLoss(std_coeff=CFG.std_coeff, cov_coeff=CFG.cov_coeff)
-
-loss_fn = BCS(lmbd=10.0)   # lmbd controls Gaussianity regularization vs invariance
-
-
-
-optimizer = AdamW(
-    context_encoder.parameters(),
-    lr           = CFG.lr,
-    weight_decay = CFG.weight_decay,
-)
-
-
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer,
-    T_max  = CFG.n_epochs * 2,   # was n_epochs — decays over 2x the actual run
-    eta_min = CFG.lr * 0.3,      # was 0.1 — don't let it drop as low
-)
-
-
-
-
-
-
-
-# Create optimizer with nested learning
-
-    # optimizer = DeepMomentumGD(
-    #     model.parameters(),
-    #     lr=1e-3,
-    #     momentum=0.9,
-    #     memory_lr=1e-4,
-    # )
-
-
-
-
-
-
-
-# ── Cell 12: Helpers ──────────────────────────────────────────────────────────
-
-def ema_update(ctx_enc, tgt_enc, decay=CFG.ema_decay):
-    """Exponential moving average: tgt ← decay*tgt + (1-decay)*ctx"""
-    with torch.no_grad():
-        for p_c, p_t in zip(ctx_enc.parameters(), tgt_enc.parameters()):
-            p_t.data.mul_(decay).add_(p_c.data, alpha=1.0 - decay)
-
-
-def masked_pool(hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """
-    Mean-pool hidden states at masked positions per batch item.
-
-    Args:
-        hidden : (B, L, D)  encoder output
-        mask   : (B, L)     bool — True at target positions
-
-    Returns:
-        pooled : (B, D)
-    """
-    mask_f = mask.unsqueeze(-1).float()            # (B, L, 1)
-    summed = (hidden * mask_f).sum(dim=1)          # (B, D)
-    count  = mask_f.sum(dim=1).clamp(min=1)        # (B, 1)
-    return summed / count
-
-
-def unpack(batch):
-    return (
-        batch['context_input_ids'].to(DEVICE),
-        batch['context_attention_mask'].to(DEVICE),
-        batch['target_input_ids'].to(DEVICE),
-        batch['target_attention_mask'].to(DEVICE),
-        batch['target_mask'].to(DEVICE),
-    )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ── Cell 13: Train / eval steps ───────────────────────────────────────────────
-
-def forward_step(batch):
-    """
-    Single JEPA forward pass (no predictor).
-
-    Returns a dict of scalar losses.
-    """
-    ctx_ids, ctx_mask, tgt_ids, tgt_mask, span_mask = unpack(batch)
-
-    # ── context encoder (grad flows here) ────────────────────────────────────
-    # Encoder is expected to return (sequence_hidden, pooled) or just hidden.
-    # Adjust the indexing below to match your Encoder's actual return signature.
-    ctx_hidden = context_encoder(ctx_ids, attention_mask=ctx_mask)   # (B, L, D)
-    if isinstance(ctx_hidden, tuple):
-        ctx_hidden = ctx_hidden[0]
-
-    # ── target encoder (no grad, EMA) ────────────────────────────────────────
-    with torch.no_grad():
-        tgt_hidden = target_encoder(tgt_ids, attention_mask=tgt_mask)
-        if isinstance(tgt_hidden, tuple):
-            tgt_hidden = tgt_hidden[0]
-
-    # ── pool only at masked positions ────────────────────────────────────────
-    z_ctx = masked_pool(ctx_hidden, span_mask)   # (B, D)
-    z_tgt = masked_pool(tgt_hidden, span_mask)   # (B, D)
-
-    # ── loss ─────────────────────────────────────────────────────────────────
-    return loss_fn(z_ctx, z_tgt)   # dict with 'loss', 'std_loss', 'cov_loss', etc.
-
-
-@torch.no_grad()
-def eval_epoch(loader):
-    context_encoder.eval()
-    totals = {}
-    n = 0
-    for batch in loader:
-        loss_dict = forward_step(batch)
-        for k, v in loss_dict.items():
-            totals[k] = totals.get(k, 0.0) + v.item()
-        n += 1
-    return {k: v / n for k, v in totals.items()}
-
-
-def train_epoch(loader, epoch):
-    context_encoder.train()
-    totals = {}
-    n = 0
-    pbar = tqdm(loader, desc=f'Epoch {epoch:02d}', leave=False)
-    for batch in pbar:
-        loss_dict = forward_step(batch)
-        loss = loss_dict['loss']
-
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(context_encoder.parameters(), 1.0)
-        optimizer.step()
-
-        # EMA update after every gradient step
-        ema_update(context_encoder, target_encoder)
-
-        for k, v in loss_dict.items():
-            totals[k] = totals.get(k, 0.0) + v.item()
-        n += 1
-
-        pbar.set_postfix({k: f'{v.item():.4f}' for k, v in loss_dict.items()})
-
-    return {k: v / n for k, v in totals.items()}
-
-# ── Cell 14: Checkpointing ────────────────────────────────────────────────────
-
-def save_checkpoint(epoch, metrics, suffix=None):
-    """Guarda checkpoint de encoders"""
-    if suffix is not None:
-        filename = f'{suffix}.pt'
-    elif isinstance(epoch, int):
-        filename = f'epoch_{epoch:03d}.pt'
-    else:
-        filename = f'epoch_{epoch}.pt'
-    
-    path = os.path.join(CFG.ckpt_dir, filename)
-    
-    torch.save({
-        'epoch':           epoch if isinstance(epoch, int) else -1,
-        'context_encoder': context_encoder.state_dict(),
-        'target_encoder':  target_encoder.state_dict(),
-        'optimizer':       optimizer.state_dict(),
-        'scheduler':       scheduler.state_dict(),
-        'metrics':         metrics,
-        'cfg':             {k: v for k, v in vars(CFG).items() if not k.startswith('_')},
-    }, path)
-    print(f'  ✓ saved → {path}')
-
-
-def load_checkpoint(path):
-    ckpt = torch.load(path, map_location=DEVICE)
-    context_encoder.load_state_dict(ckpt['context_encoder'])
-    target_encoder.load_state_dict(ckpt['target_encoder'])
-    optimizer.load_state_dict(ckpt['optimizer'])
-    scheduler.load_state_dict(ckpt['scheduler'])
-    print(f'  ✓ resumed from epoch {ckpt["epoch"]}')
-    return ckpt['epoch']
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ── Cell 15: Training loop ────────────────────────────────────────────────────
-
-history = {
-    'train_loss': [], 'train_bcs': [], 'train_inv': [],
-    'val_loss':   [], 'val_bcs':   [], 'val_inv':   [],
-    'lr':         [],
-}
-
-print(f'\n{"="*60}')
-print(f'  Text JEPA — {CFG.n_epochs} epochs   device={DEVICE}')
-print(f'{"="*60}\n')
-
-# Resume from checkpoint if one exists
-import glob
-start_epoch = 1
-best_ckpt = os.path.join(CFG.ckpt_dir, 'best.pt')
-if os.path.exists(best_ckpt):
-    print(f'Resuming from best checkpoint …')
-    start_epoch = load_checkpoint(best_ckpt) + 1
-    print(f'  starting at epoch {start_epoch}')
+# Initalise the model for all methods with a random seed or load it from a saved initial model
+torch.manual_seed(17)
+init_model = model_func()
+if not os.path.exists('%s/Model/%s/%s_init_mdl.pt' % (data_path, data_obj.name, model_name)):
+    if not os.path.exists('%s/Model/%s/' % (data_path, data_obj.name)):
+        print("Create a new directory")
+        os.mkdir('%s/Model/%s/' % (data_path, data_obj.name))
+    torch.save(init_model.state_dict(), '%s/Model/%s/%s_init_mdl.pt' % (data_path, data_obj.name, model_name))
 else:
-    print('No checkpoint found, starting from scratch.')
+    # Load model
+    init_model.load_state_dict(torch.load('%s/Model/%s/%s_init_mdl.pt' % (data_path, data_obj.name, model_name)))
 
-best_val_loss = float('inf')
+save_tasks = False
+trial = False
+train_all = 1
+learning_rate = .1
+K_list = [10, 20]
 
-for epoch in range(start_epoch, CFG.n_epochs + 1):
-    train_metrics = train_epoch(train_loader, epoch)
-    val_metrics   = eval_epoch(val_loader)
-    scheduler.step()
-
-    history['train_loss'].append(train_metrics.get('loss', 0.0))
-    history['train_bcs'].append(train_metrics.get('bcs_loss', 0.0))
-    history['train_inv'].append(train_metrics.get('invariance_loss', 0.0))
-    history['val_loss'].append(val_metrics.get('loss', 0.0))
-    history['val_bcs'].append(val_metrics.get('bcs_loss', 0.0))
-    history['val_inv'].append(val_metrics.get('invariance_loss', 0.0))
-    history['lr'].append(optimizer.param_groups[0]['lr'])
-
-    print(
-        f'Epoch {epoch:02d}/{CFG.n_epochs}  '
-        f'train_loss={train_metrics["loss"]:.4f}  '
-        f'val_loss={val_metrics["loss"]:.4f}  '
-        f'bcs={train_metrics.get("bcs_loss", 0):.4f}  '
-        f'inv={train_metrics.get("invariance_loss", 0):.4f}  '
-        f'lr={optimizer.param_groups[0]["lr"]:.2e}'
-    )
-
-    if val_metrics['loss'] < best_val_loss:
-        best_val_loss = val_metrics['loss']
-        save_checkpoint('best', val_metrics)
-        print(f'  ★ new best val_loss={best_val_loss:.4f}')
-
-print('\nTraining complete.')
-save_checkpoint(CFG.n_epochs, {})
+alpha_list = [1, 5, 10]
+num_grad_step_list = [1,5]
+learning_rate_ft_list = [0.1,0.01]
 
 
+save_models = True
+save_performance = True
+save_tensorboard = True
 
 
+### Methods
+print('Train FS')
+taskLrFT_GS = [[0.1, 1], [0.1, 5]]
+add_noFt = True
+for K in K_list:
+    print_per = K // 4 if K > 4 else 1
+    _ = train_FS(data_obj=data_obj, learning_rate=learning_rate, batch_size=batch_size, K=K, print_per=print_per,
+                  weight_decay=weight_decay, model_func=model_func, init_model=init_model,
+                  taskLrFT_GS=taskLrFT_GS, add_noFt=add_noFt,
+                  sch_step=sch_step, sch_gamma=sch_gamma, lr_decay_per_round=lr_decay_per_round,
+                  save_models=save_models, save_performance=save_performance, save_tensorboard=save_tensorboard,
+                  suffix=suffix, data_path=data_path)
 
 
+print('Train TOE')
+taskLrFT_GS = [[0.1, 1], [0.1, 5]]
+add_noFt = True
+for K in K_list:
+    print_per = K // 4 if K > 4 else 1
+    _ = train_TOE(data_obj=data_obj, learning_rate=learning_rate, batch_size=batch_size, K=K, print_per=print_per,
+                  weight_decay=weight_decay, model_func=model_func, init_model=init_model,
+                  taskLrFT_GS=taskLrFT_GS, add_noFt=add_noFt,
+                  sch_step=sch_step, sch_gamma=sch_gamma, lr_decay_per_round=lr_decay_per_round,
+                  save_models=save_models, save_performance=save_performance, save_tensorboard=save_tensorboard,
+                  suffix=suffix, data_path=data_path)
 
 
-# ── Plotting ──────────────────────────────────────────────────────────────────
-import matplotlib
-matplotlib.use('Agg')   # non-interactive backend for scripts
-import matplotlib.pyplot as plt
+print('Train FTML')
+for K in K_list:
+    for learning_rate_ft in learning_rate_ft_list:
+        for num_grad_step in num_grad_step_list:
+            print('K %3d, GS %3d' % (K, num_grad_step))
+            print_per = K // 4 if K > 4 else 1
+            _ = train_FTML(data_obj=data_obj, learning_rate=learning_rate, learning_rate_ft=learning_rate_ft,
+                           batch_size=batch_size, K=K, num_grad_step=num_grad_step, print_per=print_per,
+                           weight_decay=weight_decay, model_func=model_func, init_model=init_model,
+                           sch_step=sch_step, sch_gamma=sch_gamma, lr_decay_per_round=lr_decay_per_round,
+                           save_models=save_models, save_performance=save_performance, save_tensorboard=save_tensorboard,
+                           suffix=suffix, data_path=data_path)
 
-epochs_range = list(range(1, len(history['train_loss']) + 1))
+print('Train MOGD')
+for K in K_list:
+    for learning_rate_ft in learning_rate_ft_list:
+        for num_grad_step in num_grad_step_list:
+            print('K %3d, GS %3d' % (K, num_grad_step))
+            print_per = K // 4 if K > 4 else 1
+            _ = train_MOGD(data_obj=data_obj, learning_rate=learning_rate, learning_rate_ft=learning_rate_ft,
+                           batch_size=batch_size, K=K, num_grad_step=num_grad_step, print_per=print_per,
+                           weight_decay=weight_decay, model_func=model_func, init_model=init_model,
+                           sch_step=sch_step, sch_gamma=sch_gamma, lr_decay_per_round=lr_decay_per_round,
+                           save_models=save_models, save_performance=save_performance, save_tensorboard=save_tensorboard,
+                           suffix=suffix, data_path=data_path)
 
-fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-
-# 1. Train vs Val Loss
-axes[0, 0].plot(epochs_range, history['train_loss'], 'b-o', label='Train Loss', markersize=4)
-axes[0, 0].plot(epochs_range, history['val_loss'],   'r-s', label='Val Loss',   markersize=4)
-axes[0, 0].set_xlabel('Epoch'); axes[0, 0].set_ylabel('Total Loss')
-axes[0, 0].set_title('Stage 1: Train vs Validation Loss')
-axes[0, 0].legend(); axes[0, 0].grid(True, alpha=0.3)
-
-# 2. BCS + Invariance components
-axes[0, 1].plot(epochs_range, history['train_bcs'], 'g-^', label='BCS Loss',        markersize=4)
-if any(v != 0.0 for v in history['train_inv']):
-    axes[0, 1].plot(epochs_range, history['train_inv'], 'm-v', label='Invariance Loss', markersize=4)
-axes[0, 1].set_xlabel('Epoch'); axes[0, 1].set_ylabel('Loss Component')
-axes[0, 1].set_title('BCS Loss Components')
-axes[0, 1].legend(); axes[0, 1].grid(True, alpha=0.3)
-
-# 3. Generalization gap
-gap = [t - v for t, v in zip(history['train_loss'], history['val_loss'])]
-axes[1, 0].plot(epochs_range, gap, 'k--o', markersize=4)
-axes[1, 0].axhline(y=0, color='r', linestyle='-', alpha=0.3)
-axes[1, 0].set_xlabel('Epoch'); axes[1, 0].set_ylabel('Train − Val Loss')
-axes[1, 0].set_title('Generalization Gap (lower = better)')
-axes[1, 0].grid(True, alpha=0.3)
-
-# 4. Relative improvement
-baseline = history['val_loss'][0]
-improvement = [(baseline - v) / baseline * 100 for v in history['val_loss']]
-axes[1, 1].plot(epochs_range, improvement, 'c-s', markersize=4)
-axes[1, 1].set_xlabel('Epoch'); axes[1, 1].set_ylabel('Improvement % over baseline')
-axes[1, 1].set_title('Relative Val Loss Improvement')
-axes[1, 1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plot_path = os.path.join(CFG.ckpt_dir, 'training_curves_stage1.png')
-plt.savefig(plot_path, dpi=150)
-plt.close(fig)
-print(f'\nPlot saved → {plot_path}')
-print(f'Improvement total : {improvement[-1]:.1f}%')
-print(f'Val loss final    : {history["val_loss"][-1]:.4f}')
+print('Train MOML')
+for K in K_list:
+    for num_grad_step in num_grad_step_list:
+        for alpha in alpha_list:
+            print('K %3d, GS %3d, alpha %f' % (K, num_grad_step, alpha))
+            print_per = K // 4 if K > 4 else 1
+            _ = train_MOML(data_obj=data_obj, alpha=alpha, learning_rate=learning_rate,
+                           learning_rate_ft=learning_rate_ft,
+                           batch_size=batch_size, K=K, num_grad_step=num_grad_step, print_per=print_per,
+                           weight_decay=weight_decay, model_func=model_func, init_model=init_model,
+                           sch_step=sch_step, sch_gamma=sch_gamma, lr_decay_per_round=lr_decay_per_round,
+                           save_models=save_models, save_performance=save_performance,
+                           save_tensorboard=save_tensorboard,
+                           suffix=suffix, data_path=data_path)
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+buffer_size=10
+buffer_style='Random' # choose of Random or Last
+for K in K_list:
+    for learning_rate_ft in learning_rate_ft_list:
+        for num_grad_step in num_grad_step_list:
+            for alpha in alpha_list:
+                print('K %3d, GS %3d, alpha %f' % (K, num_grad_step, alpha))
+                print_per = K // 4 if K > 4 else 1
+                _ = train_BMOML(data_obj=data_obj, alpha=alpha, learning_rate=learning_rate,
+                               learning_rate_ft=learning_rate_ft,
+                               batch_size=batch_size, K=K, num_grad_step=num_grad_step, print_per=print_per,
+                               weight_decay=weight_decay, model_func=model_func, init_model=init_model,
+                               sch_step=sch_step, sch_gamma=sch_gamma, lr_decay_per_round=lr_decay_per_round,
+                               save_models=save_models, save_performance=save_performance,
+                               save_tensorboard=save_tensorboard, buffer_size=buffer_size, style=buffer_style,
+                               suffix=suffix, data_path=data_path)

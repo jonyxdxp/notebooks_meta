@@ -2,3 +2,8 @@ sentencepiece
 torch==2.5.1
 fire
 pytorch-lightning
+
+torchvision==0.6.0
+higher==0.2.1
+matplotlib==3.3.4
+tensorboard==2.2.1
