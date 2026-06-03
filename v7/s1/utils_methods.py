@@ -34,8 +34,8 @@ import higher
 import pickle
 
 
-from utils_dataset import *
-from utils_models import *
+from v7.s1.data.dataset import *
+from v7.s1.cog_arch.encoder import *
 from utils_general import *
 
 
