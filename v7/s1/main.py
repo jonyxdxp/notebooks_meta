@@ -8,10 +8,11 @@
 
 
 
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
-
-from utils_methods import *
+from v7.s1.utils_methods import *
 
 # Dataset initialization
 # You can change different dataset for CIFAR100 and miniImageNet
