@@ -44,7 +44,7 @@ init_model = model_func()
 if not os.path.exists('%s/Model/%s/%s_init_mdl.pt' % (data_path, data_obj.name, model_name)):
     if not os.path.exists('%s/Model/%s/' % (data_path, data_obj.name)):
         print("Create a new directory")
-        os.mkdir('%s/Model/%s/' % (data_path, data_obj.name))
+        os.makedirs('%s/Model/%s/' % (data_path, data_obj.name), exist_ok=True)
     torch.save(init_model.state_dict(), '%s/Model/%s/%s_init_mdl.pt' % (data_path, data_obj.name, model_name))
 else:
     # Load model
