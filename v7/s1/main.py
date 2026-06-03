@@ -18,7 +18,7 @@ from v7.s1.utils_methods import *
 # You can change different dataset for CIFAR100 and miniImageNet
 # When using CIFAR100 and miniImageNet, you also need to change rule='way'
 # To replcate the results, number of task n_task and model_name need to change accordingly
-data_path = '/home/rzhu/code/MOMLclean/MNIST1000_clean'  # The folder to save Data & Model MNIST1000_v1_new
+data_path = '/content/drive/MyDrive/MNIST1000_clean'  # or wherever you want data saved  # The folder to save Data & Model MNIST1000_v1_new
 rule = 'mnist_rotations_flips_crop_scale'
 seed = 17
 n_task = 1000

@@ -369,7 +369,7 @@ class DatasetObject:
                 assert False, 'Error in rule %s' % self.rule
 
             # Save data
-            os.mkdir('%s/Data/%s' % (self.data_path, self.name))
+            os.makedirs('%s/Data/%s' % (self.data_path, self.name), exist_ok=True)
 
             np.save('%s/Data/%s/trn_x.npy' % (self.data_path, self.name), self.trn_x)
             np.save('%s/Data/%s/trn_y.npy' % (self.data_path, self.name), self.trn_y)
