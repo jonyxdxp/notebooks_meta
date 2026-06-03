@@ -1,9 +1,17 @@
+# requirements.txt — replace contents with this
+torch>=2.0.0
+torchvision>=0.17.0
+transformers>=4.30.0
+datasets>=2.0.0
 sentencepiece
-torch==2.5.1
 fire
-pytorch-lightning
-
-torchvision==0.6.0
-higher==0.2.1
-matplotlib==3.3.4
-tensorboard==2.2.1
+pytorch-lightning>=2.0.0
+matplotlib>=3.5.0
+tensorboard>=2.10.0
+higher>=0.2.1
+tqdm
+numpy
+scikit-learn
+spacy
+rouge-score
+nltk
