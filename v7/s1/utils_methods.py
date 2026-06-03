@@ -36,7 +36,7 @@ import pickle
 
 from v7.s1.data.dataset import *
 from v7.s1.cog_arch.encoder import *
-from utils_general import *
+from v7.s1.utils_general import *
 
 
 ### Methods
