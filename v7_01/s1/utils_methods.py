@@ -643,18 +643,6 @@ def train_MOGD(data_obj, learning_rate, learning_rate_ft, batch_size, K, num_gra
     return online_mdls, tst_before_perf, trn_before_perf, tst_after_perf, trn_after_perf, CTM_perf, LTM_perf
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, num_grad_step,
                print_per, weight_decay, model_func, init_model, sch_step, sch_gamma, lr_decay_per_round,
                save_models, save_performance, save_tensorboard, suffix='', data_path=''):
@@ -812,14 +800,6 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
         LTM_perf = np.load(path_ + '_LTM_perf.npy')
 
     return online_mdls, tst_before_perf, trn_before_perf, tst_after_perf, trn_after_perf, CTM_perf, LTM_perf
-
-
-
-
-
-
-
-
 
 def train_BMOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, num_grad_step,
                print_per, weight_decay, model_func, init_model, sch_step, sch_gamma, lr_decay_per_round,
