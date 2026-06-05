@@ -5,112 +5,76 @@
 
 
 
-
-
-
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-
-
-
-
-import os
 import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
-from scipy.stats import multivariate_normal
-from scipy.optimize import minimize
-from scipy import io
 import torch
-import torchvision
-import torchvision.transforms as transforms
 import torch.nn as nn
-import torch.nn.functional as F
 import copy
-from IPython.core.debugger import set_trace
-import scipy.io as sio
-from itertools import combinations
-from scipy.special import gamma
-from scipy.special import loggamma
-from scipy import stats
-from scipy.optimize import minimize
-from sklearn import svm
-from sklearn import mixture
-from torchsummary import summary
-import random
-from PIL import Image
-import higher
-import pickle
-
+from torch.utils.tensorboard import SummaryWriter
 
 from v7_01.s1.data.dataset import *
 from v7_01.s1.cog_arch.encoder import *
 from v7_01.s1.utils_general import *
 
+# ── Paths ────────────────────────────────────────────────────────────────────
+data_path      = '/content/drive/MyDrive/data/cache'          # directory, not a file
+dialog_train   = '/content/notebooks_meta/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_train.txt'
+dialog_valid   = '/content/notebooks_meta/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_valid.txt'
+dialog_test    = '/content/notebooks_meta/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_test.txt'
 
+# ── Dataset ──────────────────────────────────────────────────────────────────
+data_obj = DatasetObject(
+    dataset='dailydialog',
+    train_file=dialog_train,
+    valid_file=dialog_valid,
+    test_file=dialog_test,
+)
 
+# ── Model ────────────────────────────────────────────────────────────────────
+model_name = 'SMI_v7_01'                        # ← was missing entirely
 
+model_func = lambda: SMI(
+    vocab_size=9000,
+    d_model=512,
+    encoder_layers=4,
+    encoder_heads=4,
+)
 
+# ── Hyperparameters ───────────────────────────────────────────────────────────
+weight_decay          = 1e-4
+batch_size            = 10
+learning_rate         = 0.1
+learning_rate_ft      = 0.01        # ← was missing entirely
+lr_decay_per_round    = 1
+sch_step              = 1
+sch_gamma             = 1
 
-# Dataset initialization
-# You can change different dataset for CIFAR100 and miniImageNet
-# When using CIFAR100 and miniImageNet, you also need to change rule='way'
-# To replcate the results, number of task n_task and model_name need to change accordingly
-data_path = '/content/drive/MyDrive/MNIST1000_clean'  # or wherever you want data saved  # The folder to save Data & Model MNIST1000_v1_new
-rule = 'mnist_rotations_flips_crop_scale'
-seed = 17
-n_task = 1000
-data_obj = DatasetObject(dataset='mnist', seed=seed, n_task=n_task, rule=rule, data_path=data_path)
-model_name = 'mnist_2NN'  # Model type
+K_list                = [10, 20]
+alpha_list            = [1, 5, 10]
+num_grad_step_list    = [1, 5]
+learning_rate_ft_list = [0.1, 0.01]
 
+save_models           = True
+save_performance      = True
+save_tensorboard      = True
+suffix                = model_name
 
-
-
-
-###
-# Common hyperparameters
-weight_decay = 1e-4
-batch_size = 10
-suffix = model_name
-lr_decay_per_round = 1
-sch_step = 1
-sch_gamma = 1
-
-
-
-
-
-# Model function
-model_func = SMI(model_name)
-init_model = model_func()
-
-# Initalise the model for all methods with a random seed or load it from a saved initial model
+# ── Init model ────────────────────────────────────────────────────────────────
 torch.manual_seed(17)
 init_model = model_func()
-if not os.path.exists('%s/Model/%s/%s_init_mdl.pt' % (data_path, data_obj.name, model_name)):
-    if not os.path.exists('%s/Model/%s/' % (data_path, data_obj.name)):
-        print("Create a new directory")
-        os.makedirs('%s/Model/%s/' % (data_path, data_obj.name), exist_ok=True)
-    torch.save(init_model.state_dict(), '%s/Model/%s/%s_init_mdl.pt' % (data_path, data_obj.name, model_name))
+
+model_dir = '%s/Model/%s' % (data_path, data_obj.name)
+os.makedirs(model_dir, exist_ok=True)
+
+init_mdl_path = '%s/%s_init_mdl.pt' % (model_dir, model_name)
+if not os.path.exists(init_mdl_path):
+    torch.save(init_model.state_dict(), init_mdl_path)
 else:
-    # Load model
-    init_model.load_state_dict(torch.load('%s/Model/%s/%s_init_mdl.pt' % (data_path, data_obj.name, model_name)))
-
-save_tasks = False
-trial = False
-train_all = 1
-learning_rate = .1
-K_list = [10, 20]
-
-alpha_list = [1, 5, 10]
-num_grad_step_list = [1,5]
-learning_rate_ft_list = [0.1,0.01]
+    init_model.load_state_dict(torch.load(init_mdl_path))
 
 
-save_models = True
-save_performance = True
-save_tensorboard = True
 
 
 
@@ -302,20 +266,38 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
 
 ### Method
 
+
+# ── Train ─────────────────────────────────────────────────────────────────────
 print('Train MOML')
 for K in K_list:
     for num_grad_step in num_grad_step_list:
         for alpha in alpha_list:
             print('K %3d, GS %3d, alpha %f' % (K, num_grad_step, alpha))
             print_per = K // 4 if K > 4 else 1
-            _ = train_MOML(data_obj=data_obj, alpha=alpha, learning_rate=learning_rate,
-                           learning_rate_ft=learning_rate_ft,
-                           batch_size=batch_size, K=K, num_grad_step=num_grad_step, print_per=print_per,
-                           weight_decay=weight_decay, model_func=model_func, init_model=init_model,
-                           sch_step=sch_step, sch_gamma=sch_gamma, lr_decay_per_round=lr_decay_per_round,
-                           save_models=save_models, save_performance=save_performance,
-                           save_tensorboard=save_tensorboard,
-                           suffix=suffix, data_path=data_path)
+            _ = train_MOML(
+                data_obj=data_obj,
+                alpha=alpha,
+                learning_rate=learning_rate,
+                learning_rate_ft=learning_rate_ft,
+                batch_size=batch_size,
+                K=K,
+                num_grad_step=num_grad_step,
+                print_per=print_per,
+                weight_decay=weight_decay,
+                model_func=model_func,
+                init_model=init_model,
+                sch_step=sch_step,
+                sch_gamma=sch_gamma,
+                lr_decay_per_round=lr_decay_per_round,
+                save_models=save_models,
+                save_performance=save_performance,
+                save_tensorboard=save_tensorboard,
+                suffix=suffix,
+                data_path=data_path,
+            )
+
+
+
 
 
 
