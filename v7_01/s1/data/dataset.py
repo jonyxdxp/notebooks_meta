@@ -104,3 +104,34 @@ class DatasetObject:
             task_x.append(contexts[start:end])
             task_y.append(labels[start:end])
         return task_x, task_y
+
+
+
+
+
+
+
+
+
+class Dataset(torch.utils.data.Dataset):
+    def __init__(self, contexts, labels, train=True, dataset_name='dailydialog', max_len=128):
+        self.contexts = contexts
+        self.labels   = labels
+        self.max_len  = max_len
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        utterances = self.contexts[idx]
+        text       = ' </s> '.join(utterances)
+        tokens     = tokenizer(
+            text,
+            return_tensors='pt',
+            max_length=self.max_len,
+            truncation=True,
+            padding='max_length',
+        )
+        input_ids = tokens['input_ids'].squeeze(0)          # (max_len,)
+        label     = torch.tensor(self.labels[idx], dtype=torch.long)
+        return input_ids, label
