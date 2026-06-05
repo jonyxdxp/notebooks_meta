@@ -94,8 +94,8 @@ def get_acc_loss(data_x, data_y, model, dataset_name, w_decay=None):
     loss_overall = 0;
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
 
-    batch_size = min(6000, data_x.shape[0])
-    n_tst = data_x.shape[0]
+    batch_size = min(6000, len(data_x))
+    n_tst = len(data_x)
     tst_load = torch.utils.data.DataLoader(Dataset(data_x, data_y, dataset_name=dataset_name),
                                            batch_size=batch_size, shuffle=False)
     model.eval();

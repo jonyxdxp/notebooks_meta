@@ -303,6 +303,15 @@ for K in K_list:
 
 
 
+# ── Sanity check ─────────────────────────────────────────────────────────────
+_test = model_func()
+_vocab = _test.smi.embedding.emb.num_embeddings
+print(f"[check] embedding vocab size = {_vocab}")
+assert _vocab == 50265, f"Wrong vocab size {_vocab} — stale .pyc still loaded"
+del _test
+
+
+
 
 
 
