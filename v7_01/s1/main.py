@@ -20,9 +20,9 @@ from v7_01.s1.utils_general import *
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 data_path      = '/content/drive/MyDrive/data/cache'          # directory, not a file
-dialog_train   = '/content/notebooks_meta/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_train.txt'
-dialog_valid   = '/content/notebooks_meta/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_valid.txt'
-dialog_test    = '/content/notebooks_meta/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_test.txt'
+dialog_train   = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_train.txt'
+dialog_valid   = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_valid.txt'
+dialog_test    = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_test.txt'
 
 # ── Dataset ──────────────────────────────────────────────────────────────────
 data_obj = DatasetObject(
