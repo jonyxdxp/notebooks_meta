@@ -26,10 +26,11 @@ dialog_test    = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialo
 
 # ── Dataset ──────────────────────────────────────────────────────────────────
 data_obj = DatasetObject(
-    dataset='dailydialog',
-    train_file=dialog_train,
-    valid_file=dialog_valid,
-    test_file=dialog_test,
+    dataset    = 'dailydialog',
+    train_file = dialog_train,
+    valid_file = dialog_valid,
+    test_file  = dialog_test,
+    n_tasks    = 10,            # tune this — affects loop length in train_MOML
 )
 
 # ── Model ────────────────────────────────────────────────────────────────────

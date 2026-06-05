@@ -54,3 +54,53 @@ def load_data_with_tags(dialog_file):
             contexts.append(utterances[:i])
             labels.append(tag_act(utterances[i]))
     return contexts, labels
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class DatasetObject:
+    """
+    Wraps dailydialog into n_tasks sequential chunks for MOML continual learning.
+
+    Attributes:
+        trn_x / trn_y  : list[list]  – one entry per task, training contexts / labels
+        tst_x / tst_y  : list[list]  – one entry per task, test contexts / labels
+        name           : str         – used for save-path construction in train_MOML
+        dataset        : str         – dataset identifier string
+    """
+
+    def __init__(self, dataset, train_file, valid_file, test_file, n_tasks=10):
+        self.dataset = dataset
+        self.name    = dataset                                  # e.g. 'dailydialog'
+
+        trn_ctx, trn_lbl = load_data_with_tags(train_file)
+        tst_ctx, tst_lbl = load_data_with_tags(test_file)
+
+        self.trn_x, self.trn_y = self._chunk(trn_ctx, trn_lbl, n_tasks)
+        self.tst_x, self.tst_y = self._chunk(tst_ctx, tst_lbl, n_tasks)
+
+        print(f'[DatasetObject] {n_tasks} tasks | '
+              f'train: {[len(x) for x in self.trn_x]} samples | '
+              f'test:  {[len(x) for x in self.tst_x]} samples')
+
+    @staticmethod
+    def _chunk(contexts, labels, n_tasks):
+        n          = len(contexts)
+        chunk_size = n // n_tasks
+        task_x, task_y = [], []
+        for i in range(n_tasks):
+            start = i * chunk_size
+            end   = (start + chunk_size) if (i < n_tasks - 1) else n
+            task_x.append(contexts[start:end])
+            task_y.append(labels[start:end])
+        return task_x, task_y
