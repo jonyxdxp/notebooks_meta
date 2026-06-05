@@ -134,7 +134,7 @@ def get_maml_acc_loss(trn_x, trn_y, model, model_func, learning_rate, num_grad_s
     optimizer_ = torch.optim.SGD(_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     # Do Fine Tuning on all dataset
     if batch_sz is None:
-        batch_sz = len(trn_y)
+        batch_sz = 32          # safe default; avoids OOM on large tasks
     trn_load = torch.utils.data.DataLoader(Dataset(trn_x, trn_y, train=True, dataset_name=dataset_name),
                                            batch_size=batch_sz, shuffle=True)
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
