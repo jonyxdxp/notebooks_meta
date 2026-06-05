@@ -37,12 +37,12 @@ data_obj = DatasetObject(
 model_name = 'SMI_v7_01'                        # ← was missing entirely
 
 model_func = lambda: SMIClassifier(
-    vocab_size=9000,
+    vocab_size=50265,       # ← must match RobertaTokenizer exactly
     d_model=512,
     encoder_layers=4,
     encoder_heads=4,
-    num_classes=4,      # Inform / Question / Directive / Commissive
-    pad_token_id=1,     # RoBERTa tokenizer pad token id
+    num_classes=4,
+    pad_token_id=1,
 )
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
