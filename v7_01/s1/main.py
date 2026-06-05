@@ -36,11 +36,13 @@ data_obj = DatasetObject(
 # ── Model ────────────────────────────────────────────────────────────────────
 model_name = 'SMI_v7_01'                        # ← was missing entirely
 
-model_func = lambda: SMI(
+model_func = lambda: SMIClassifier(
     vocab_size=9000,
     d_model=512,
     encoder_layers=4,
     encoder_heads=4,
+    num_classes=4,      # Inform / Question / Directive / Commissive
+    pad_token_id=1,     # RoBERTa tokenizer pad token id
 )
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────

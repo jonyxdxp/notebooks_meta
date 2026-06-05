@@ -278,3 +278,41 @@ class SMI(nn.Module):
         loss = -mi
         return score, loss, mi
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+class SMIClassifier(nn.Module):
+    """
+    Thin classification wrapper around SMI.
+    SMI is untouched — this just routes forward() through
+    forward_context_only() and adds a linear head.
+    """
+    def __init__(self, vocab_size=9000, d_model=512, encoder_layers=4,
+                 encoder_heads=4, dim_feedforward=2048,
+                 num_classes=4, pad_token_id=1):
+        super().__init__()
+        self.smi = SMI(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            encoder_layers=encoder_layers,
+            encoder_heads=encoder_heads,
+            dim_feedforward=dim_feedforward,
+        )
+        self.classifier = nn.Linear(d_model, num_classes)
+        self.pad_token_id = pad_token_id   # RoBERTa: pad=1
+
+    def forward(self, input_ids):
+        # True at padding positions → ignored by TransformerEncoder
+        mask = (input_ids == self.pad_token_id).bool()      # (B, T)
+        c_t  = self.smi.forward_context_only(input_ids, mask)  # (B, d_model)
+        return self.classifier(c_t)                            # (B, num_classes)
