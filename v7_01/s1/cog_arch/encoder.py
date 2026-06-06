@@ -97,7 +97,9 @@ class Transformer(nn.Module):
         self.pos_encoder = PositionalEncoding(d_model)
 
 #         self.encoder_layer = RZTXEncoderLayer(d_model=self.d_model, nhead=heads)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=heads, dim_feedforward=dim_feedforward, batch_first=True)
+        encoder_layer = nn.TransformerEncoderLayer(
+    d_model=d_model, nhead=heads, dim_feedforward=dim_feedforward
+)
         self.encoder = nn.TransformerEncoder(encoder_layer=encoder_layer, num_layers=num_layers)
 
         # self.emb = nn.Embedding(self.vocab_size, self.d_model)
