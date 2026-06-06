@@ -173,23 +173,25 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
             omega_model = 1 / 2 * (curr_par + omega_model) - 1 / 2 * 1 / alpha * lambda_model
 
             ### Evaluation
-            trn_after_perf[task] = get_maml_acc_loss(task_x[task], task_y[task], meta_model, model_func,
-                                                     learning_rate_ft, num_grad_step, dataset_name)
+            trn_after_perf[task] = get_maml_mi_loss(
+                        task_x[task], task_y[task], meta_model, model_func,
+                        learning_rate_ft, num_grad_step)
 
             # Test all seen tasks.
             for tt in range(task + 1):
-                tst_after_perf[task][tt] = get_maml_acc_loss(task_x[tt], task_y[tt], meta_model, model_func,
-                                                             learning_rate_ft, num_grad_step, dataset_name,
-                                                             tst_x=data_obj.tst_x[tt], tst_y=data_obj.tst_y[tt])
+                    tst_after_perf[task][tt] = get_maml_mi_loss(
+                            task_x[tt], task_y[tt], meta_model, model_func,
+                            learning_rate_ft, num_grad_step,
+                            tst_ctx=data_obj.tst_x[tt], tst_rsp=data_obj.tst_y[tt])
 
             ### CTM and LTM
             CTM_perf[task] = tst_before_perf[task][task]
             LTM_perf[task] = np.mean(tst_after_perf[task, :task + 1, :], axis=0)
 
-            print('\n*** Task %2d, Training   data, Accuracy: %.4f, Loss: %.4f'
-                  % (task + 1, trn_after_perf[task][1], trn_after_perf[task][0]))
-            print('*** Task %2d, Test       data, Accuracy: %.4f, Loss: %.4f\n'
-                  % (task + 1, tst_after_perf[task, task, 1], tst_after_perf[task, task, 0]))
+            print('\n*** Task %2d, Training   data, MI: %.4f, Loss: %.4f'
+                % (task + 1, trn_after_perf[task][1], trn_after_perf[task][0]))
+            print('*** Task %2d, Test       data, MI: %.4f, Loss: %.4f\n'
+                % (task + 1, tst_after_perf[task, task, 1], tst_after_perf[task, task, 0]))
 
             if save_tensorboard:
                 ## Loss
