@@ -17,6 +17,11 @@ import torch.nn as nn
 import copy
 from torch.utils.tensorboard import SummaryWriter
 
+# higher library requires math attention — flash/efficient kernels lack backward support
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+
 from v7_01.s1.data.dataset import *
 from v7_01.s1.cog_arch.encoder import *
 from v7_01.s1.utils_general import *
