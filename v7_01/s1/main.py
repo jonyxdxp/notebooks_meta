@@ -64,8 +64,8 @@ sch_step              = 1
 sch_gamma             = 1
 
 K_list                = [50, 100]
-alpha_list            = [1, 5, 10]
-num_grad_step_list    = [1, 5]
+alpha_list         = [0.001, 0.01, 0.1]   # ← much weaker regularisation
+num_grad_step_list = [5, 10]               # ← more inner adaptation steps
 learning_rate_ft_list = [0.1, 0.01]
 
 save_models           = True
