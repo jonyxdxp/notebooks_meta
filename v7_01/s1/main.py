@@ -148,12 +148,13 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
                     tt]  # The model is not updated, no need to calculate twice
 
             tst_before_perf[task][task] = get_maml_mi_loss(
-                task_x[task], task_y[task], meta_model, model_func,
-                learning_rate_ft, num_grad_step,
-                tst_ctx=data_obj.tst_x[task], tst_rsp=data_obj.tst_y[task])
+                    task_x[task], task_y[task], meta_model, model_func,
+                    learning_rate_ft, num_grad_step,
+                    tst_ctx=data_obj.tst_x[task], tst_rsp=data_obj.tst_y[task])
 
-            trn_before_perf[task] = get_maml_acc_loss(task_x[task], task_y[task], meta_model, model_func,
-                                                      learning_rate_ft, num_grad_step, dataset_name)
+            trn_before_perf[task] = get_maml_mi_loss(
+                    task_x[task], task_y[task], meta_model, model_func,
+                    learning_rate_ft, num_grad_step)
 
             # Train only get the current task
             trn_x = task_x[task]
