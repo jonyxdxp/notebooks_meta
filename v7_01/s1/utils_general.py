@@ -707,7 +707,11 @@ def train_MOML_smi_model(model, model_func, trn_ctx, trn_rsp,
     inner_opt  = torch.optim.Adam(model.parameters(), lr=learning_rate_ft, weight_decay=weight_decay)
 
     loader = torch.utils.data.DataLoader(
-        DialogPairDataset(trn_ctx, trn_rsp), batch_size=batch_size, shuffle=True)
+            DialogPairDataset(trn_ctx, trn_rsp),
+                batch_size=batch_size,   # will now be 64
+                shuffle=True,
+                drop_last=True           # ← add this: avoids tiny final batches that break InfoNCE
+                    )
 
     for k in range(K):
         # collect two batches: support + query

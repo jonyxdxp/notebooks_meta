@@ -3,7 +3,8 @@
 # from https://github.com/ruizhaoz/MOML/blob/main/main.py
 
 
-
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
 
 
 import sys, os
@@ -54,7 +55,7 @@ model_func = lambda: SMI(                  # ← back to raw SMI, no classifier 
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 weight_decay          = 1e-4
-batch_size            = 10
+batch_size            = 64
 learning_rate    = 1e-3
 learning_rate_ft = 1e-4    # slower inner loop for stable MI optimisation
 lr_decay_per_round    = 1
@@ -62,7 +63,7 @@ lr_decay_per_round    = 1
 sch_step              = 1
 sch_gamma             = 1
 
-K_list                = [10, 20]
+K_list                = [50, 100]
 alpha_list            = [1, 5, 10]
 num_grad_step_list    = [1, 5]
 learning_rate_ft_list = [0.1, 0.01]

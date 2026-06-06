@@ -187,7 +187,7 @@ class SMI(nn.Module):
             self.lsoftmax0 = nn.LogSoftmax(dim=0)
             self.lsoftmax1 = nn.LogSoftmax(dim=1)
         else:
-            self.lsoftmax1 = nn.LogSoftmax()
+            self.lsoftmax1 = nn.LogSoftmax(dim=1)
         self.symmetric_loss = symmetric_loss
 
         # self._reset_parameters()
