@@ -32,33 +32,33 @@ dialog_train   = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialo
 dialog_valid   = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_valid.txt'
 dialog_test    = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_test.txt'
 
+
 # ── Dataset ──────────────────────────────────────────────────────────────────
-data_obj = DatasetObject(
-    dataset    = 'dailydialog',
-    train_file = dialog_train,
-    valid_file = dialog_valid,
-    test_file  = dialog_test,
-    n_tasks    = 10,            # tune this — affects loop length in train_MOML
+data_obj = DialogPairDatasetObject(        # ← replaces DatasetObject
+    train_file=dialog_train,
+    valid_file=dialog_valid,
+    test_file=dialog_test,
+    n_tasks=10,
 )
 
-# ── Model ────────────────────────────────────────────────────────────────────
-model_name = 'SMI_v7_01'                        # ← was missing entirely
+# ── Model ─────────────────────────────────────────────────────────────────────
+model_name = 'SMI_DMI_MOML_v7_01'
 
-model_func = lambda: SMIClassifier(
-    vocab_size=50265,       # ← must match RobertaTokenizer exactly
+model_func = lambda: SMI(                  # ← back to raw SMI, no classifier head
+    vocab_size=50265,
     d_model=512,
     encoder_layers=4,
     encoder_heads=4,
-    num_classes=4,
-    pad_token_id=1,
 )
+
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 weight_decay          = 1e-4
 batch_size            = 10
-learning_rate         = 0.1
-learning_rate_ft      = 0.01        # ← was missing entirely
+learning_rate    = 1e-3
+learning_rate_ft = 1e-4    # slower inner loop for stable MI optimisation
 lr_decay_per_round    = 1
+
 sch_step              = 1
 sch_gamma             = 1
 
@@ -147,9 +147,10 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
                 tst_before_perf[task][tt] = tst_after_perf[task - 1][
                     tt]  # The model is not updated, no need to calculate twice
 
-            tst_before_perf[task][task] = get_maml_acc_loss(task_x[task], task_y[task], meta_model, model_func,
-                                                            learning_rate_ft, num_grad_step, dataset_name,
-                                                            tst_x=data_obj.tst_x[task], tst_y=data_obj.tst_y[task])
+            tst_before_perf[task][task] = get_maml_mi_loss(
+                task_x[task], task_y[task], meta_model, model_func,
+                learning_rate_ft, num_grad_step,
+                tst_ctx=data_obj.tst_x[task], tst_rsp=data_obj.tst_y[task])
 
             trn_before_perf[task] = get_maml_acc_loss(task_x[task], task_y[task], meta_model, model_func,
                                                       learning_rate_ft, num_grad_step, dataset_name)
@@ -158,10 +159,13 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
             trn_x = task_x[task]
             trn_y = task_y[task]
             decay = lr_decay_per_round ** task
-            meta_model = train_MOML_model(meta_model, model_func, trn_x, trn_y, alpha, omega_model, lambda_model,
-                                          learning_rate * decay, learning_rate_ft, num_grad_step, batch_size, K,
-                                          print_per,
-                                          weight_decay, dataset_name, sch_step, sch_gamma)
+            meta_model = train_MOML_smi_model(
+                meta_model, model_func, trn_x, trn_y,
+                alpha, omega_model, lambda_model,
+                learning_rate * decay, learning_rate_ft, num_grad_step,
+                batch_size, K, print_per, weight_decay,
+                pad_token_id=1,          # RoBERTa pad
+                sch_step=sch_step, sch_gamma=sch_gamma)
             curr_par = get_mdl_params([meta_model], n_par=n_par)[0]
             # updating the lambda model and omega model
             lambda_model = lambda_model - alpha * (curr_par - omega_model)

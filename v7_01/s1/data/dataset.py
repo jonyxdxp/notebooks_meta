@@ -135,3 +135,73 @@ class Dataset(torch.utils.data.Dataset):
         input_ids = tokens['input_ids'].squeeze(0)          # (max_len,)
         label     = torch.tensor(self.labels[idx], dtype=torch.long)
         return input_ids, label
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class DialogPairDataset(torch.utils.data.Dataset):
+    """Returns (context_ids, response_ids) for SMI/DMI training. No labels."""
+    def __init__(self, contexts, responses, max_len=64):
+        self.contexts  = contexts
+        self.responses = responses
+        self.max_len   = max_len
+
+    def __len__(self):
+        return len(self.responses)
+
+    def __getitem__(self, idx):
+        ctx_text = ' </s> '.join(self.contexts[idx])
+        rsp_text = self.responses[idx]
+        ctx_ids = tokenizer(ctx_text, return_tensors='pt', max_length=self.max_len,
+                            truncation=True, padding='max_length')['input_ids'].squeeze(0)
+        rsp_ids = tokenizer(rsp_text, return_tensors='pt', max_length=self.max_len,
+                            truncation=True, padding='max_length')['input_ids'].squeeze(0)
+        return ctx_ids, rsp_ids
+
+
+class DialogPairDatasetObject:
+    """Sequential task-split dataset for MOML SMI training."""
+    def __init__(self, train_file, valid_file, test_file, n_tasks=10):
+        self.dataset = 'dailydialog'
+        self.name    = 'dailydialog'
+        trn_ctx, trn_rsp = self._load_pairs(train_file)
+        tst_ctx, tst_rsp = self._load_pairs(test_file)
+        self.trn_x, self.trn_y = self._chunk(trn_ctx, trn_rsp, n_tasks)
+        self.tst_x, self.tst_y = self._chunk(tst_ctx, tst_rsp, n_tasks)
+        print(f'[DialogPairDatasetObject] {n_tasks} tasks | '
+              f'train: {[len(x) for x in self.trn_x]} pairs | '
+              f'test:  {[len(x) for x in self.tst_x]} pairs')
+
+    @staticmethod
+    def _load_pairs(dialog_file):
+        contexts, responses = [], []
+        for line in open(dialog_file).readlines():
+            utterances = [u.strip() for u in line.strip().split('__eou__') if u.strip()]
+            for i in range(1, len(utterances)):
+                contexts.append(utterances[:i])   # all prior turns
+                responses.append(utterances[i])   # next turn
+        return contexts, responses
+
+    @staticmethod
+    def _chunk(contexts, responses, n_tasks):
+        n, task_x, task_y = len(contexts), [], []
+        chunk = n // n_tasks
+        for i in range(n_tasks):
+            s = i * chunk
+            e = s + chunk if i < n_tasks - 1 else n
+            task_x.append(contexts[s:e])
+            task_y.append(responses[s:e])
+        return task_x, task_y

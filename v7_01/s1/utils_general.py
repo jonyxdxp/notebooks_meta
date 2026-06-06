@@ -618,3 +618,137 @@ def train_BMOML_model(model, model_func, trn_x, trn_y, alpha, omega_model, lambd
         scheduler_.step()
 
     return model
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+PAD_TOKEN_ID = 1   # RoBERTa pad token
+
+def get_mi_loss(ctx_list, rsp_list, model, pad_token_id=PAD_TOKEN_ID):
+    """Analogue of get_acc_loss — returns (loss, mi) instead of (loss, acc)."""
+    from v7_01.s1.data.dataset import DialogPairDataset
+    loader = torch.utils.data.DataLoader(
+        DialogPairDataset(ctx_list, rsp_list), batch_size=64, shuffle=False)
+    model.eval(); model = model.to(device)
+    total_loss, total_mi, n = 0., 0., 0
+    with torch.no_grad():
+        for ctx_ids, rsp_ids in loader:
+            ctx_ids, rsp_ids   = ctx_ids.to(device), rsp_ids.to(device)
+            mask_ctx, mask_rsp = (ctx_ids == pad_token_id), (rsp_ids == pad_token_id)
+            c_t, z_t           = model(ctx_ids, rsp_ids, mask_ctx, mask_rsp)
+            _, loss, mi        = model._compute_loss(c_t, z_t)
+            total_loss += loss.item(); total_mi += mi; n += 1
+    model.train()
+    return total_loss / n, total_mi / n
+
+
+def get_maml_mi_loss(trn_ctx, trn_rsp, model, model_func, learning_rate, num_grad_step,
+                     tst_ctx=None, tst_rsp=None, weight_decay=0,
+                     pad_token_id=PAD_TOKEN_ID, batch_sz=32):
+    """Analogue of get_maml_acc_loss for SMI/DMI objective."""
+    from v7_01.s1.data.dataset import DialogPairDataset
+    _model = model_func().to(device)
+    _model.load_state_dict(copy.deepcopy(dict(model.named_parameters())), strict=False)
+    for p in _model.parameters(): p.requires_grad = True
+
+    opt = torch.optim.Adam(_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    loader = torch.utils.data.DataLoader(
+        DialogPairDataset(trn_ctx, trn_rsp), batch_size=batch_sz, shuffle=True)
+    _model.train()
+
+    for _ in range(num_grad_step):
+        for ctx_ids, rsp_ids in loader:
+            ctx_ids, rsp_ids   = ctx_ids.to(device), rsp_ids.to(device)
+            mask_ctx, mask_rsp = (ctx_ids == pad_token_id), (rsp_ids == pad_token_id)
+            c_t, z_t           = _model(ctx_ids, rsp_ids, mask_ctx, mask_rsp)
+            _, loss, _         = _model._compute_loss(c_t, z_t)
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(_model.parameters(), max_norm=max_norm)
+            opt.step()
+
+    eval_ctx = tst_ctx if tst_ctx is not None else trn_ctx
+    eval_rsp = tst_rsp if tst_rsp is not None else trn_rsp
+    result = get_mi_loss(eval_ctx, eval_rsp, _model, pad_token_id)
+    del _model
+    return result   # (loss, mi)
+
+
+def train_MOML_smi_model(model, model_func, trn_ctx, trn_rsp,
+                         alpha, omega_model, lambda_model,
+                         learning_rate, learning_rate_ft, num_grad_step,
+                         batch_size, K, print_per, weight_decay,
+                         pad_token_id, sch_step, sch_gamma):
+    """MOML outer loop training with DMI objective instead of CrossEntropy."""
+    from v7_01.s1.data.dataset import DialogPairDataset
+    model.train(); model = model.to(device)
+
+    optimizer_ = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler_ = torch.optim.lr_scheduler.StepLR(optimizer_, step_size=sch_step, gamma=sch_gamma)
+    inner_opt  = torch.optim.Adam(model.parameters(), lr=learning_rate_ft, weight_decay=weight_decay)
+
+    loader = torch.utils.data.DataLoader(
+        DialogPairDataset(trn_ctx, trn_rsp), batch_size=batch_size, shuffle=True)
+
+    for k in range(K):
+        # collect two batches: support + query
+        data_list = []
+        while len(data_list) < 2:
+            for batch in loader:
+                data_list.append(batch)
+                if len(data_list) == 2: break
+
+        ctx_s, rsp_s = data_list[0][0].to(device), data_list[0][1].to(device)
+        ctx_q, rsp_q = data_list[1][0].to(device), data_list[1][1].to(device)
+        mk_ctx_s, mk_rsp_s = (ctx_s == pad_token_id), (rsp_s == pad_token_id)
+        mk_ctx_q, mk_rsp_q = (ctx_q == pad_token_id), (rsp_q == pad_token_id)
+
+        optimizer_.zero_grad()
+        with higher.innerloop_ctx(model, inner_opt, copy_initial_weights=False) as (fnet, diffopt):
+            # ── inner loop: adapt on support set ──
+            for _ in range(num_grad_step):
+                c_t, z_t   = fnet(ctx_s, rsp_s, mk_ctx_s, mk_rsp_s)
+                _, loss, _ = fnet._compute_loss(c_t, z_t)
+                diffopt.step(loss)
+
+            # ── outer loop: query loss + MOML proximal terms ──
+            c_t, z_t      = fnet(ctx_q, rsp_q, mk_ctx_q, mk_rsp_q)
+            _, val_loss, _ = fnet._compute_loss(c_t, z_t)
+
+            mld_pars    = torch.cat([p.reshape(-1) for p in model.parameters()])
+            val_loss   += -torch.sum(mld_pars * lambda_model)
+            val_loss   += -alpha * torch.sum(mld_pars * omega_model) \
+                          + alpha / 2 * torch.sum(mld_pars * mld_pars)
+            val_loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+        optimizer_.step()
+
+        if (k + 1) % print_per == 0:
+            loss_, mi_ = get_maml_mi_loss(trn_ctx, trn_rsp, model, model_func,
+                                          learning_rate_ft, num_grad_step,
+                                          pad_token_id=pad_token_id)
+            print(f"Step {k+1:4d}, LR: {scheduler_.get_last_lr()[0]:.5f}, "
+                  f"MI: {mi_:.4f}, Loss: {loss_:.4f}")
+        scheduler_.step()
+
+    return model
