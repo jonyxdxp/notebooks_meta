@@ -697,21 +697,22 @@ def train_MOML_smi_model(model, model_func, trn_ctx, trn_rsp,
                          alpha, omega_model, lambda_model,
                          learning_rate, learning_rate_ft, num_grad_step,
                          batch_size, K, print_per, weight_decay,
-                         pad_token_id, sch_step, sch_gamma):
+                         pad_token_id, sch_step, sch_gamma,
+                         inner_batch_size=16):   # ← new param, small for higher
     """MOML outer loop training with DMI objective instead of CrossEntropy."""
     from v7_01.s1.data.dataset import DialogPairDataset
     model.train(); model = model.to(device)
 
     optimizer_ = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler_ = torch.optim.lr_scheduler.StepLR(optimizer_, step_size=sch_step, gamma=sch_gamma)
-    inner_opt  = torch.optim.Adam(model.parameters(), lr=learning_rate_ft, weight_decay=weight_decay)
+    inner_opt = torch.optim.SGD(model.parameters(), lr=learning_rate_ft, weight_decay=weight_decay)
 
     loader = torch.utils.data.DataLoader(
-            DialogPairDataset(trn_ctx, trn_rsp),
-                batch_size=batch_size,   # will now be 64
-                shuffle=True,
-                drop_last=True           # ← add this: avoids tiny final batches that break InfoNCE
-                    )
+        DialogPairDataset(trn_ctx, trn_rsp),
+        batch_size=inner_batch_size,   # 16 inside higher
+        shuffle=True,
+        drop_last=True
+    )
 
     for k in range(K):
         # collect two batches: support + query

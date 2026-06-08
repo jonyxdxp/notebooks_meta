@@ -65,7 +65,7 @@ sch_gamma             = 1
 
 K_list                = [50, 100]
 alpha_list         = [0.001, 0.01, 0.1]   # ← much weaker regularisation
-num_grad_step_list = [5, 10]               # ← more inner adaptation steps
+num_grad_step_list = [1, 3]               # ← more inner adaptation steps
 learning_rate_ft_list = [0.1, 0.01]
 
 save_models           = True
@@ -139,6 +139,7 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
 
     if not os.path.exists('%s/Model/%s/%s/%d_tst_before_perf.npy' % (data_path, data_obj.name, suffix, n_tasks)):
         # Train
+        torch.cuda.empty_cache()
         for task in range(n_tasks):
             print('---- Round %2d' % (task + 1))
 
@@ -231,6 +232,8 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
                 torch.save(meta_model.state_dict(), '%s/Model/%s/%s/%d_meta_model.pt'
                            % (data_path, data_obj.name, suffix, task + 1))
 
+            torch.cuda.empty_cache()
+
         if save_performance:
             # Save results
             path_ = '%s/Model/%s/%s/%d' % (data_path, data_obj.name, suffix, n_tasks)
@@ -247,6 +250,7 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
     else:
         # Load
         if save_models:
+            torch.cuda.empty_cache()
             for task in range(n_tasks):
                 meta_model = model_func().to(device)
                 meta_model.load_state_dict(torch.load('%s/Model/%s/%s/%d_meta_model.pt'
@@ -264,7 +268,7 @@ def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, 
         LTM_perf = np.load(path_ + '_LTM_perf.npy')
 
     return online_mdls, tst_before_perf, trn_before_perf, tst_after_perf, trn_after_perf, CTM_perf, LTM_perf
-
+ 
 
 
 
