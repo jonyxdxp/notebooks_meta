@@ -335,7 +335,7 @@ def train_MOGD_model(model, model_func, trn_x, trn_y, learning_rate, learning_ra
             # This unrolls through the gradient steps.
             val_loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=max_norm)  # Clip gradients
+        torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=1.0)  # Clip gradients
         optimizer_.step()
 
         if (k + 1) % print_per == 0:
@@ -407,7 +407,7 @@ def train_MOML_model(model, model_func, trn_x, trn_y, alpha, omega_model, lambda
             # This unrolls through the gradient steps.
             val_loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=max_norm)  # Clip gradients
+        torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=1.0)  # Clip gradients
         optimizer_.step()
 
         if (k + 1) % print_per == 0:

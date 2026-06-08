@@ -247,16 +247,17 @@ class SMI(nn.Module):
 
 
     def _compute_loss(self, c_t, z_t):
-        score = torch.mm(c_t, torch.transpose(z_t, 0, 1))  # (batch, batch)
-        # batch_size = score.shape[0]
+        # Normalise to unit sphere — keeps dot products in [-1, 1]
+        c_t = torch.nn.functional.normalize(c_t, dim=1)
+        z_t = torch.nn.functional.normalize(z_t, dim=1)
+
+        score = torch.mm(c_t, z_t.T)  # (batch, batch), cosine similarity matrix
         if self.symmetric_loss:
-            loss = - 0.5*torch.mean(torch.diag(self.lsoftmax1(score))) \
-                   - 0.5*torch.mean(torch.diag(self.lsoftmax0(score)))
+            loss = - 0.5 * torch.mean(torch.diag(self.lsoftmax1(score))) \
+                - 0.5 * torch.mean(torch.diag(self.lsoftmax0(score)))
         else:
             loss = -torch.mean(torch.diag(self.lsoftmax1(score)))
-        # loss = -torch.mean(torch.diag(self.lsoftmax0(score)))
-        # loss /= -1. * batch_size  # Take expectation
-        mi = np.log(c_t.shape[0]) - loss.item()
+        mi = torch.log(torch.tensor(float(c_t.shape[0]))) - loss.item()
         return score, loss, mi
 
     def compute_loss_custom(self, c_t, z_t, estimator_name=None):

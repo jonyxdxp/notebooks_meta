@@ -745,7 +745,7 @@ def train_MOML_smi_model(model, model_func, trn_ctx, trn_rsp,
                           + alpha / 2 * torch.sum(mld_pars * mld_pars)
             val_loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # ← add
         optimizer_.step()
 
         if (k + 1) % print_per == 0:
