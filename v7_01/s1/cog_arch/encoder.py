@@ -107,6 +107,7 @@ class SMI(nn.Module):
             self.encoder  = Transformer(d_model, vocab_size, encoder_layers,
                                         encoder_heads, dim_feedforward=dim_feedforward)
             self.embedding = Embedding(vocab_size, d_model)
+            self._reset_parameters()
         else:
             self.invert_mask = True
             self.embedding   = identity
@@ -171,12 +172,10 @@ class SMI(nn.Module):
         return c_t, z_t
 
     def _compute_loss(self, c_t, z_t):
-        c_t = torch.nn.functional.normalize(c_t, dim=1)
-        z_t = torch.nn.functional.normalize(z_t, dim=1)
         score = torch.mm(c_t, z_t.T)
         if self.symmetric_loss:
             loss = - 0.5 * torch.mean(torch.diag(self.lsoftmax1(score))) \
-                   - 0.5 * torch.mean(torch.diag(self.lsoftmax0(score)))
+               - 0.5 * torch.mean(torch.diag(self.lsoftmax0(score)))
         else:
             loss = -torch.mean(torch.diag(self.lsoftmax1(score)))
         mi = torch.log(torch.tensor(float(c_t.shape[0]))) - loss.item()
