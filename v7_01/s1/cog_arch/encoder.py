@@ -126,8 +126,8 @@ class SMI(nn.Module):
     def _reset_parameters(self):
         for n, p in self.named_parameters():
             if p.dim() > 1:
-                if 'embedding' in n:
-                    nn.init.normal_(p, mean=0.0, std=0.02)  # init estándar para embeddings
+                if 'emb' in n and 'weight' in n:
+                    nn.init.normal_(p, mean=0.0, std=1.0)   # ← era 0.02
                 else:
                     nn.init.xavier_normal_(p)
 
