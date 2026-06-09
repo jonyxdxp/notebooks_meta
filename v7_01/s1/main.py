@@ -45,19 +45,22 @@ data_obj = DialogPairDatasetObject(        # ← replaces DatasetObject
 # ── Model ─────────────────────────────────────────────────────────────────────
 model_name = 'SMI_DMI_MOML_v7_01'
 
-model_func = lambda: SMI(                  # ← back to raw SMI, no classifier head
-    vocab_size=50265,
-    d_model=512,
-    encoder_layers=4,
-    encoder_heads=4,
+model_func = lambda: SMI(
+    vocab_size = 50265,
+    d_model    = 256,      # was 512
+    encoder_layers = 2,    # was 4
+    encoder_heads  = 4,
+    roberta_init   = False,
 )
+
+
 
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 weight_decay          = 1e-4
 batch_size            = 64
 learning_rate    = 1e-3
-learning_rate_ft = 1e-4    # slower inner loop for stable MI optimisation
+learning_rate_ft = 1e-4
 lr_decay_per_round    = 1
 
 sch_step              = 1
