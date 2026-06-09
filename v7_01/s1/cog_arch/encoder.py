@@ -125,7 +125,10 @@ class SMI(nn.Module):
     def _reset_parameters(self):
         for n, p in self.named_parameters():
             if p.dim() > 1:
-                torch.nn.init.xavier_normal_(p)
+                if 'embedding' in n:
+                    nn.init.normal_(p, mean=0.0, std=0.02)  # init estándar para embeddings
+                else:
+                    nn.init.xavier_normal_(p)
 
     def _mean_pool(self, encoder_output, mask):
         """
