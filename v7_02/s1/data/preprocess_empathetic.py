@@ -42,6 +42,7 @@ import json
 import os
 from collections import defaultdict
 from pathlib import Path
+import pandas as pd, urllib.request, tempfile, os as _os
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -55,13 +56,13 @@ def preprocess_empathetic(output_dir: str, verbose: bool = True) -> dict:
 
     Returns a summary dict: {split: {'n_dialogs', 'n_pairs', 'emotions'}}.
     """
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        raise ImportError(
-            "Run:  !pip install -q datasets\n"
-            "then retry preprocess_empathetic()."
-        )
+
+    # EmpatheticDialogues still uses a legacy HF loading script that
+    # newer `datasets` dropped.  Download the CSV directly from the
+    # original Facebook Research repo instead — no extra dependencies.
+    _FB = ('https://raw.githubusercontent.com/'
+           'facebookresearch/EmpatheticDialogues/master/data')
+    _fname = {'train': 'train', 'validation': 'valid', 'test': 'test'}
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     summary = {}
@@ -76,22 +77,25 @@ def preprocess_empathetic(output_dir: str, verbose: bool = True) -> dict:
         if verbose:
             print(f"\nProcessing split: {hf_split} …")
 
-        ds = load_dataset('empathetic_dialogues', split=hf_split,
-                          trust_remote_code=True)
+        url = f'{_FB}/{_fname[hf_split]}.csv'
+        if verbose:
+            print(f"  Downloading {url}")
+        tmp = tempfile.NamedTemporaryFile(suffix='.csv', delete=False)
+        urllib.request.urlretrieve(url, tmp.name)
+        df = pd.read_csv(tmp.name, on_bad_lines='skip')
+        _os.unlink(tmp.name)
+        df.columns = [c.strip() for c in df.columns]   # strip whitespace
 
         # ── Group rows by conversation ─────────────────────────────────
-        # Each row: conv_id, utterance_idx, context (emotion), utterance
-        convs    = defaultdict(list)   # conv_id → [(idx, text)]
-        emotions = {}                  # conv_id → emotion label
+        convs    = defaultdict(list)
+        emotions = {}
 
-        for row in ds:
-            cid = row['conv_id']
-            # EmpatheticDialogues uses '_comma_' as a comma escape
-            text = row['utterance'].replace('_comma_', ',').strip()
-            convs[cid].append((row['utterance_idx'], text))
-            # 'context' is the emotion label; same for all rows of a conv
+        for _, row in df.iterrows():
+            cid  = str(row['conv_id']).strip()
+            text = str(row['utterance']).replace('_comma_', ',').strip()
+            convs[cid].append((int(row['utterance_idx']), text))
             if cid not in emotions:
-                emotions[cid] = row['context'].strip()
+                emotions[cid] = str(row['context']).strip()
 
         # ── Sort turns and build flat dialog list ──────────────────────
         dialog_lines   = []
