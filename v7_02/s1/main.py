@@ -38,551 +38,390 @@ from v7_02.s1.data.dataset     import DialogCRDataset, OnlineTaskStream
 
 
 
-───────────────────────────────────────────────────────
-data_path      = '/content/drive/MyDrive/data/cache'          # directory, not a file
-dialog_train   = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_train.txt'
-dialog_valid   = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_valid.txt'
-dialog_test    = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog/dialogues_test.txt'
- 
- 
- 
- 
- 
- 
- 
-# --- Configuración y Ejecución ---
-if __name__ == '__main__':
-    # Parámetros del modelo DMI
-    VOCAB_SIZE = 30522 # Ejemplo para BertTokenizerFast, ajustar si se usa otro
-    D_MODEL = 256 # Tamaño del embedding
-    PROJECTION_SIZE = 256
-    ENCODER_LAYERS = 2 # Capas del Transformer
-    ENCODER_HEADS = 4 # Cabezas de atención
-    DIM_FEEDFORWARD = 512
- 
-    # Parámetros de MOML
-    ALPHA = 0.1
-    LEARNING_RATE = 0.001 # Meta-learning rate
-    LEARNING_RATE_FT = 0.01 # Inner loop learning rate
-    BATCH_SIZE = 16 # Tamaño de batch para support/query sets
-    K_META_UPDATES = 5 # Número de meta-actualizaciones por tarea (K en MOML)
-    NUM_GRAD_STEP_INNER = 1 # Número de pasos de gradiente en el inner loop
-    PRINT_PER = 1 # Frecuencia de impresión en el inner loop
-    WEIGHT_DECAY = 1e-4
-    SCH_STEP = 1
-    SCH_GAMMA = 1
-    LR_DECAY_PER_ROUND = 1 # No decay por defecto
- 
-    # Parámetros del Dataset
-    NUM_TASKS = 50 # Número de tareas para MOML
-    SAMPLES_PER_TASK = 100 # Muestras por tarea (se dividirán en support/query)
-    MAX_CTX_LEN = 128
-    MAX_RESP_LEN = 64
-    
-    # Ruta al dataset DailyDialog
-    DAILYDIALOG_PATH = os.path.join(repo_dmi_dir, 'data', 'dailydialog', 'dialogues_train.txt')
- 
-    # Inicializar Tokenizador (usaremos BertTokenizerFast como ejemplo)
-    tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
-    # Añadir tokens especiales si es necesario, como '__eou__'
-    if '__eou__' not in tokenizer.get_vocab():
-        tokenizer.add_special_tokens({'additional_special_tokens': ['__eou__']})
-        # Actualizar VOCAB_SIZE si se añaden tokens
-        VOCAB_SIZE = len(tokenizer)
- 
-    # Crear el objeto de dataset para MOML
-    meta_dataset_obj = MetaDialogDataset(
-        DAILYDIALOG_PATH, tokenizer, NUM_TASKS, SAMPLES_PER_TASK,
-        max_ctx_len=MAX_CTX_LEN, max_resp_len=MAX_RESP_LEN
-    )
- 
-    # Definir la función que devuelve el modelo DMI envuelto
-    model_func_dmi = lambda: MetaDMIModel(
-        vocab_size=VOCAB_SIZE, d_model=D_MODEL, projection_size=PROJECTION_SIZE,
-        encoder_layers=ENCODER_LAYERS, encoder_heads=ENCODER_HEADS, dim_feedforward=DIM_FEEDFORWARD
-    )
- 
-    # Inicializar el modelo para MOML
-    init_dmi_model = model_func_dmi()
- 
-    # Ejecutar el entrenamiento MOML-DMI
-    final_meta_model, all_losses = train_MOML_DMI(
-        data_obj=meta_dataset_obj, alpha=ALPHA, learning_rate=LEARNING_RATE,
-        learning_rate_ft=LEARNING_RATE_FT, batch_size=BATCH_SIZE, K=K_META_UPDATES,
-        num_grad_step=NUM_GRAD_STEP_INNER, print_per=PRINT_PER, weight_decay=WEIGHT_DECAY,
-        model_func=model_func_dmi, init_model=init_dmi_model, sch_step=SCH_STEP,
-        sch_gamma=SCH_GAMMA, lr_decay_per_round=LR_DECAY_PER_ROUND,
-        save_models=False, save_performance=False, save_tensorboard=False
-    )
- 
-    print("\nMeta-entrenamiento completado. El modelo final está en 'final_meta_model'.")
-    print("Pérdidas por tarea:", all_losses)
- 
-    # Opcional: Guardar el modelo final
-    # torch.save(final_meta_model.state_dict(), '/content/drive/MyDrive/final_dmi_moml_encoder.pt')
-    # print("Modelo final guardado en /content/drive/MyDrive/final_dmi_moml_encoder.pt")
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
-# MOML function
- 
- 
-def train_MOML(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, num_grad_step,
-               print_per, weight_decay, model_func, init_model, sch_step, sch_gamma, lr_decay_per_round,
-               save_models, save_performance, save_tensorboard, suffix='', data_path=''):
-    suffix = 'MOML_' + suffix
-    suffix += '_alpha%f_Lr%f_LrT%f_B%d_K%d_GS_%d_W%f' % (
-    alpha, learning_rate, learning_rate_ft, batch_size, K, num_grad_step, weight_decay)
-    suffix += '_lrdecay%f_%d_%f' % (lr_decay_per_round, sch_step, sch_gamma)
- 
-    task_x = data_obj.trn_x
-    task_y = data_obj.trn_y
-    dataset_name = data_obj.dataset
-    n_tasks = len(task_x)
- 
-    if (save_models or save_performance) and (
-    not os.path.exists('%s/Model/%s/%s' % (data_path, data_obj.name, suffix))):
-        os.mkdir('%s/Model/%s/%s' % (data_path, data_obj.name, suffix))
- 
-    online_mdls = [None] * n_tasks
-    writer = SummaryWriter('%s/Runs/%s/%s' % (data_path, data_obj.name, suffix)) if save_tensorboard else None
- 
-    tst_before_perf = np.zeros((n_tasks, n_tasks, 2))
-    trn_before_perf = np.zeros((n_tasks, 2))
- 
-    tst_after_perf = np.zeros((n_tasks, n_tasks, 2))
-    trn_after_perf = np.zeros((n_tasks, 2))
- 
-    CTM_perf = np.zeros((n_tasks, 2))
-    LTM_perf = np.zeros((n_tasks, 2))
- 
-    # Initialize model
-    meta_model = model_func().to(device)
-    meta_model.load_state_dict(copy.deepcopy(dict(init_model.named_parameters())), strict=False)
- 
-    omega_model = get_mdl_params([init_model])[0]
-    n_par = omega_model.shape[0]
-    lambda_model = torch.zeros(n_par, dtype=torch.float32, device=device)  # Start from all 0s
- 
-    if not os.path.exists('%s/Model/%s/%s/%d_tst_before_perf.npy' % (data_path, data_obj.name, suffix, n_tasks)):
-        # Train
-        torch.cuda.empty_cache()
-        for task in range(n_tasks):
-            print('---- Round %2d' % (task + 1))
- 
-            ### Evaluation
-            # Test all seen tasks including the current one before training.
-            for tt in range(task):
-                tst_before_perf[task][tt] = tst_after_perf[task - 1][
-                    tt]  # The model is not updated, no need to calculate twice
- 
-            tst_before_perf[task][task] = get_maml_mi_loss(
-                    task_x[task], task_y[task], meta_model, model_func,
-                    learning_rate_ft, num_grad_step,
-                    tst_ctx=data_obj.tst_x[task], tst_rsp=data_obj.tst_y[task])
- 
-            trn_before_perf[task] = get_maml_mi_loss(
-                    task_x[task], task_y[task], meta_model, model_func,
-                    learning_rate_ft, num_grad_step)
- 
-            # Train only get the current task
-            trn_x = task_x[task]
-            trn_y = task_y[task]
-            decay = lr_decay_per_round ** task
-            meta_model = train_MOML_DMI_model(
-                meta_model, model_func, trn_x, trn_y,
-                alpha, omega_model, lambda_model,
-                learning_rate * decay, learning_rate_ft, num_grad_step,
-                batch_size, K, print_per, weight_decay,
-                pad_token_id=1,          # RoBERTa pad
-                sch_step=sch_step, sch_gamma=sch_gamma)
-            curr_par = get_mdl_params([meta_model], n_par=n_par)[0]
-            # updating the lambda model and omega model
-            lambda_model = lambda_model - alpha * (curr_par - omega_model)
-            omega_model = 1 / 2 * (curr_par + omega_model) - 1 / 2 * 1 / alpha * lambda_model
- 
-            ### Evaluation
-            trn_after_perf[task] = get_maml_mi_loss(
-                        task_x[task], task_y[task], meta_model, model_func,
-                        learning_rate_ft, num_grad_step)
- 
-            # Test all seen tasks.
-            for tt in range(task + 1):
-                    tst_after_perf[task][tt] = get_maml_mi_loss(
-                            task_x[tt], task_y[tt], meta_model, model_func,
-                            learning_rate_ft, num_grad_step,
-                            tst_ctx=data_obj.tst_x[tt], tst_rsp=data_obj.tst_y[tt])
- 
-            ### CTM and LTM
-            CTM_perf[task] = tst_before_perf[task][task]
-            LTM_perf[task] = np.mean(tst_after_perf[task, :task + 1, :], axis=0)
- 
-            print('\n*** Task %2d, Training   data, MI: %.4f, Loss: %.4f'
-                % (task + 1, trn_after_perf[task][1], trn_after_perf[task][0]))
-            print('*** Task %2d, Test       data, MI: %.4f, Loss: %.4f\n'
-                % (task + 1, tst_after_perf[task, task, 1], tst_after_perf[task, task, 0]))
- 
-            if save_tensorboard:
-                ## Loss
-                writer.add_scalar('Loss/Train_Before', trn_before_perf[task, 0], task + 1)
-                writer.add_scalar('Loss/Train_After', trn_after_perf[task, 0], task + 1)
- 
-                writer.add_scalar('Loss/Train_Before_Avg', np.mean(trn_before_perf[:task + 1, 0]), task + 1)
-                writer.add_scalar('Loss/Train_After_Avg', np.mean(trn_after_perf[:task + 1, 0]), task + 1)
- 
-                writer.add_scalar('Loss/CTM', CTM_perf[task, 0], task + 1)
-                writer.add_scalar('Loss/CTM_Avg', np.mean(CTM_perf[:task + 1, 0]), task + 1)
- 
-                writer.add_scalar('Loss/LTM', LTM_perf[task, 0], task + 1)
-                writer.add_scalar('Loss/LTM_Avg', np.mean(LTM_perf[:task + 1, 0]), task + 1)
- 
-                writer.add_scalar('Loss/Task_1', tst_after_perf[task, 0, 0], task + 1)
- 
-                ## Accuracy
-                writer.add_scalar('Accuracy/Train_Before', trn_before_perf[task, 1], task + 1)
-                writer.add_scalar('Accuracy/Train_After', trn_after_perf[task, 1], task + 1)
- 
-                writer.add_scalar('Accuracy/Train_Before_Avg', np.mean(trn_before_perf[:task + 1, 1]), task + 1)
-                writer.add_scalar('Accuracy/Train_After_Avg', np.mean(trn_after_perf[:task + 1, 1]), task + 1)
- 
-                writer.add_scalar('Accuracy/CTM', CTM_perf[task, 1], task + 1)
-                writer.add_scalar('Accuracy/CTM_Avg', np.mean(CTM_perf[:task + 1, 1]), task + 1)
- 
-                writer.add_scalar('Accuracy/LTM', LTM_perf[task, 1], task + 1)
-                writer.add_scalar('Accuracy/LTM_Avg', np.mean(LTM_perf[:task + 1, 1]), task + 1)
- 
-                writer.add_scalar('Accuracy/Task_1', tst_after_perf[task, 0, 1], task + 1)
- 
-            online_mdls[task] = meta_model
- 
-            if save_models:
-                torch.save(meta_model.state_dict(), '%s/Model/%s/%s/%d_meta_model.pt'
-                           % (data_path, data_obj.name, suffix, task + 1))
- 
-            torch.cuda.empty_cache()
- 
-        if save_performance:
-            # Save results
-            path_ = '%s/Model/%s/%s/%d' % (data_path, data_obj.name, suffix, n_tasks)
-            np.save(path_ + '_tst_before_perf.npy', tst_before_perf)
-            np.save(path_ + '_trn_before_perf.npy', trn_before_perf)
- 
-            np.save(path_ + '_tst_after_perf.npy', tst_after_perf)
-            np.save(path_ + '_trn_after_perf.npy', trn_after_perf)
- 
-            np.save(path_ + '_CTM_perf.npy', CTM_perf)
-            np.save(path_ + '_LTM_perf.npy', LTM_perf)
- 
- 
-    else:
-        # Load
-        if save_models:
-            torch.cuda.empty_cache()
-            for task in range(n_tasks):
-                meta_model = model_func().to(device)
-                meta_model.load_state_dict(torch.load('%s/Model/%s/%s/%d_meta_model.pt'
-                                                      % (data_path, data_obj.name, suffix, task + 1)))
-                online_mdls[task] = meta_model
- 
-        path_ = '%s/Model/%s/%s/%d' % (data_path, data_obj.name, suffix, n_tasks)
-        tst_before_perf = np.load(path_ + '_tst_before_perf.npy')
-        trn_before_perf = np.load(path_ + '_trn_before_perf.npy')
- 
-        tst_after_perf = np.load(path_ + '_tst_after_perf.npy')
-        trn_after_perf = np.load(path_ + '_trn_after_perf.npy')
- 
-        CTM_perf = np.load(path_ + '_CTM_perf.npy')
-        LTM_perf = np.load(path_ + '_LTM_perf.npy')
- 
-    return online_mdls, tst_before_perf, trn_before_perf, tst_after_perf, trn_after_perf, CTM_perf, LTM_perf
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
-if __name__ == "__main__":
-    ### Method
-    
-    
-    # ── Train ─────────────────────────────────────────────────────────────────────
-    print('Train MOML')
-    for K in K_list:
-        for num_grad_step in num_grad_step_list:
-            for alpha in alpha_list:
-                print('K %3d, GS %3d, alpha %f' % (K, num_grad_step, alpha))
-                print_per = K // 4 if K > 4 else 1
-                _ = train_MOML(
-                    data_obj=data_obj,
-                    alpha=alpha,
-                    learning_rate=learning_rate,
-                    learning_rate_ft=learning_rate_ft,
-                    batch_size=batch_size,
-                    K=K,
-                    num_grad_step=num_grad_step,
-                    print_per=print_per,
-                    weight_decay=weight_decay,
-                    model_func=model_func,
-                    init_model=init_model,
-                    sch_step=sch_step,
-                    sch_gamma=sch_gamma,
-                    lr_decay_per_round=lr_decay_per_round,
-                    save_models=save_models,
-                    save_performance=save_performance,
-                    save_tensorboard=save_tensorboard,
-                    suffix=suffix,
-                    data_path=data_path,
-                )
-    
-    
-    
-    
-    
-    # ── Sanity check ─────────────────────────────────────────────────────────────
-    _test = model_func()
-    _vocab = _test.smi.embedding.emb.num_embeddings
-    print(f"[check] embedding vocab size = {_vocab}")
-    assert _vocab == 50265, f"Wrong vocab size {_vocab} — stale .pyc still loaded"
-    del _test
-    
-    
-    
-    
-    
-    
-    
-    
-    
- 
- 
-# ── Added for MOML+DMI notebook ───────────────────────────────────────────────
-import os, random, math
-from dataclasses import dataclass, asdict
- 
-import torch
-import higher
-from tqdm.auto import tqdm
- 
- 
-def count_params(model) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
- 
- 
-def _flat(model, device):
-    return torch.cat([p.detach().reshape(-1) for p in model.parameters()]).to(device)
- 
- 
+
+# ─────────────────────────────────────────────────────────────────────
+# Config
+# ─────────────────────────────────────────────────────────────────────
+
 @dataclass
 class MOMLConfig:
-    # paths
+    # ── paths ─────────────────────────────────────────────────────────
     data_root:       str   = '/content/Discourse-Mutual-Information-DMI-main/data/dailydialog'
     output_path:     str   = '/content/drive/MyDrive/dmi_moml_ckpts'
-    # tokeniser
+
+    # ── tokeniser ─────────────────────────────────────────────────────
     max_ctx_len:     int   = 150
     max_resp_len:    int   = 60
-    # model
+
+    # ── model (scratch) ───────────────────────────────────────────────
     d_model:         int   = 256
     dim_feedforward: int   = 1024
     encoder_layers:  int   = 4
     encoder_heads:   int   = 4
     projection_size: int   = 256
+    dropout:         float = 0.1
     symmetric_loss:  bool  = False
-    estimator:       str   = 'infonce'
-    # MOML
+    estimator:       str   = 'infonce'   # 'infonce' | 'jsd'
+
+    # ── MOML hyperparameters ──────────────────────────────────────────
     alpha:           float = 5.0
     n_tasks:         int   = 300
     pairs_per_task:  int   = 240
-    # inner loop
+
+    # ── inner loop ────────────────────────────────────────────────────
     num_inner_steps: int   = 3
     lr_inner:        float = 5e-4
-    # outer loop
+
+    # ── outer loop ────────────────────────────────────────────────────
     lr_outer:        float = 1e-4
     batch_size:      int   = 32
     grad_clip:       float = 1.0
-    # misc
+
+    # ── logging / ckpt ────────────────────────────────────────────────
     seed:            int   = 42
     log_every:       int   = 10
     val_every:       int   = 50
     val_batches:     int   = 40
     save_best:       bool  = True
- 
- 
-def _moml_step(meta_model, spt_pairs, qry_pairs, collate_fn,
-               omega, lam, cfg, device, outer_opt):
-    """One MOML task: inner adapt on support → outer InfoNCE+proximal on query."""
-    from cog_arch.encoder import compute_loss
- 
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Utilities
+# ─────────────────────────────────────────────────────────────────────
+
+def flat_params(model: nn.Module, device) -> torch.Tensor:
+    return torch.cat(
+        [p.detach().reshape(-1) for p in model.parameters()]
+    ).to(device)
+
+
+def count_params(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def set_seed(seed: int):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Core: one MOML task step
+# ─────────────────────────────────────────────────────────────────────
+
+def moml_task_step(
+    meta_model,
+    support_pairs,
+    query_pairs,
+    collate_fn,
+    omega:        torch.Tensor,
+    lam:          torch.Tensor,
+    cfg:          MOMLConfig,
+    device:       str,
+    outer_opt:    torch.optim.Optimizer,
+):
+    """
+    One full MOML step for a single task.
+
+    Inner loop  : adapt a functional copy of meta_model on support pairs
+                  using InfoNCE loss (via `higher` — fully differentiable).
+    Outer loss  : InfoNCE on query pairs (evaluated at adapted params)
+                  + MOML proximal terms on the OUTER (meta) params θ:
+                      −λᵀθ  +  (−α·ωᵀθ + α/2·‖θ‖²)
+    Returns dict of scalar metrics, or None if task is too small.
+    """
     meta_model.train()
-    bs = cfg.batch_size
- 
-    def batches(pairs):
+
+    def make_batches(pairs):
         random.shuffle(pairs)
+        bs = cfg.batch_size
         return [pairs[i:i+bs] for i in range(0, len(pairs), bs)
                 if len(pairs[i:i+bs]) >= 8]
- 
-    spt_b, qry_b = batches(spt_pairs), batches(qry_pairs)
-    if not spt_b or not qry_b:
+
+    spt_batches = make_batches(support_pairs)
+    qry_batches = make_batches(query_pairs)
+    if not spt_batches or not qry_batches:
         return None
- 
+
     inner_opt = torch.optim.SGD(meta_model.parameters(), lr=cfg.lr_inner)
     outer_opt.zero_grad()
-    total_ql, total_mi, n = torch.tensor(0., device=device), 0., 0
- 
-    with higher.innerloop_ctx(meta_model, inner_opt,
-                              copy_initial_weights=False) as (fnet, diffopt):
+
+    total_qry_loss = torch.tensor(0.0, device=device)
+    total_qry_mi   = 0.0
+    n_qry          = 0
+
+    with higher.innerloop_ctx(
+        meta_model, inner_opt, copy_initial_weights=False
+    ) as (fnet, diffopt):
+
+        # ── Inner loop: adapt fnet on support set ─────────────────────
         for _ in range(cfg.num_inner_steps):
-            for b in spt_b:
-                ctx, rsp, mc, mr = collate_fn(b)
-                ctx, rsp, mc, mr = ctx.to(device), rsp.to(device), mc.to(device), mr.to(device)
-                c_t, z_t = fnet(ctx, rsp, mc, mr)
-                _, loss, _ = compute_loss(c_t, z_t, cfg.estimator, cfg.symmetric_loss)
-                diffopt.step(loss)
- 
-        for b in qry_b:
-            ctx, rsp, mc, mr = collate_fn(b)
-            ctx, rsp, mc, mr = ctx.to(device), rsp.to(device), mc.to(device), mr.to(device)
-            c_t, z_t = fnet(ctx, rsp, mc, mr)
-            _, ql, mi = compute_loss(c_t, z_t, cfg.estimator, cfg.symmetric_loss)
-            total_ql = total_ql + ql
-            total_mi += mi
-            n += 1
- 
-        if n == 0:
+            for spt_b in spt_batches:
+                ctx, rsp, m_ctx, m_rsp = collate_fn(spt_b)
+                ctx, rsp   = ctx.to(device),   rsp.to(device)
+                m_ctx, m_rsp = m_ctx.to(device), m_rsp.to(device)
+                c_t, z_t   = fnet(ctx, rsp, m_ctx, m_rsp)
+                _, spt_loss, _ = compute_loss(
+                    c_t, z_t, cfg.estimator, cfg.symmetric_loss)
+                diffopt.step(spt_loss)
+
+        # ── Outer: query InfoNCE (through inner loop) + proximal ──────
+        for qry_b in qry_batches:
+            ctx, rsp, m_ctx, m_rsp = collate_fn(qry_b)
+            ctx, rsp   = ctx.to(device),   rsp.to(device)
+            m_ctx, m_rsp = m_ctx.to(device), m_rsp.to(device)
+            c_t, z_t   = fnet(ctx, rsp, m_ctx, m_rsp)
+            _, qry_loss, qry_mi = compute_loss(
+                c_t, z_t, cfg.estimator, cfg.symmetric_loss)
+            total_qry_loss = total_qry_loss + qry_loss
+            total_qry_mi  += qry_mi
+            n_qry         += 1
+
+        if n_qry == 0:
             return None
-        avg_ql = total_ql / n
-        theta   = torch.cat([p.reshape(-1) for p in meta_model.parameters()])
-        total_loss = (avg_ql
-                      - torch.sum(theta * lam)
-                      - cfg.alpha * torch.sum(theta * omega)
-                      + cfg.alpha / 2 * torch.sum(theta * theta))
+
+        avg_qry_loss = total_qry_loss / n_qry
+
+        # MOML proximal terms on OUTER params θ (not the adapted fnet)
+        meta_flat   = torch.cat([p.reshape(-1) for p in meta_model.parameters()])
+        loss_lambda = -torch.sum(meta_flat * lam)
+        loss_omega  = (-cfg.alpha * torch.sum(meta_flat * omega)
+                       + (cfg.alpha / 2.0) * torch.sum(meta_flat * meta_flat))
+
+        total_loss  = avg_qry_loss + loss_lambda + loss_omega
         total_loss.backward()
- 
+
     if cfg.grad_clip > 0:
         torch.nn.utils.clip_grad_norm_(meta_model.parameters(), cfg.grad_clip)
     outer_opt.step()
-    return {'total_loss': total_loss.item(),
-            'qry_loss': avg_ql.item(), 'qry_mi': total_mi / n}
- 
- 
+
+    return {
+        'total_loss': total_loss.item(),
+        'qry_loss':   avg_qry_loss.item(),
+        'qry_mi':     total_qry_mi / n_qry,
+        'n_spt_b':    len(spt_batches),
+        'n_qry_b':    n_qry,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Validation
+# ─────────────────────────────────────────────────────────────────────
+
 @torch.no_grad()
-def validate(meta_model, valid_ds, cfg, device):
-    from cog_arch.encoder import compute_loss
+def validate(meta_model, valid_ds, cfg: MOMLConfig, device: str) -> dict:
     meta_model.eval()
     pairs = list(valid_ds.cr_pairs)
     random.shuffle(pairs)
-    bs = cfg.batch_size
-    batches = [pairs[i:i+bs] for i in range(0, len(pairs), bs)
-               if len(pairs[i:i+bs]) >= 8][:cfg.val_batches]
-    tl, tm, n = 0., 0., 0
+    batches = [pairs[i:i+cfg.batch_size]
+               for i in range(0, len(pairs), cfg.batch_size)
+               if len(pairs[i:i+cfg.batch_size]) >= 8]
+    batches = batches[:cfg.val_batches]
+
+    total_loss, total_mi, n = 0.0, 0.0, 0
     for b in batches:
-        ctx, rsp, mc, mr = valid_ds.collate(b)
-        ctx, rsp, mc, mr = ctx.to(device), rsp.to(device), mc.to(device), mr.to(device)
-        c_t, z_t = meta_model(ctx, rsp, mc, mr)
+        ctx, rsp, m_ctx, m_rsp = valid_ds.collate(b)
+        ctx, rsp   = ctx.to(device),   rsp.to(device)
+        m_ctx, m_rsp = m_ctx.to(device), m_rsp.to(device)
+        c_t, z_t   = meta_model(ctx, rsp, m_ctx, m_rsp)
         _, loss, mi = compute_loss(c_t, z_t, cfg.estimator, cfg.symmetric_loss)
-        tl += loss.item(); tm += mi; n += 1
+        total_loss += loss.item()
+        total_mi   += mi
+        n          += 1
+
     meta_model.train()
-    return {'val_loss': tl/n if n else 0., 'val_mi': tm/n if n else 0.}
- 
- 
+    return {
+        'val_loss': total_loss / n if n else 0.0,
+        'val_mi':   total_mi   / n if n else 0.0,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Main training loop
+# ─────────────────────────────────────────────────────────────────────
+
 def train_moml_dmi(cfg: MOMLConfig, train_ds, valid_ds,
                    vocab_size: int, device: str):
-    from cog_arch.encoder import DMIScratchEncoder
-    from data.dataset import OnlineTaskStream
- 
-    torch.manual_seed(cfg.seed); random.seed(cfg.seed)
+    """
+    Full MOML training loop.
+
+    Parameters
+    ----------
+    cfg        : MOMLConfig
+    train_ds   : DialogCRDataset
+    valid_ds   : DialogCRDataset
+    vocab_size : int
+    device     : 'cuda' | 'cpu'
+
+    Returns
+    -------
+    meta_model : trained DMIScratchEncoder
+    history    : dict of logged scalars
+    """
+    set_seed(cfg.seed)
     os.makedirs(cfg.output_path, exist_ok=True)
- 
+
+    # ── Model ──────────────────────────────────────────────────────────
+    print("\n── Building DMI encoder (from scratch) ──")
     meta_model = DMIScratchEncoder(
-        vocab_size=vocab_size, d_model=cfg.d_model,
-        projection_size=cfg.projection_size,
-        encoder_layers=cfg.encoder_layers, encoder_heads=cfg.encoder_heads,
-        dim_feedforward=cfg.dim_feedforward,
-        symmetric_loss=cfg.symmetric_loss,
+        vocab_size       = vocab_size,
+        d_model          = cfg.d_model,
+        projection_size  = cfg.projection_size,
+        encoder_layers   = cfg.encoder_layers,
+        encoder_heads    = cfg.encoder_heads,
+        dim_feedforward  = cfg.dim_feedforward,
+        dropout          = cfg.dropout,
+        symmetric_loss   = cfg.symmetric_loss,
     ).to(device)
-    print(f'Parameters: {count_params(meta_model)/1e6:.2f}M')
- 
-    omega = _flat(meta_model, device)
-    lam   = torch.zeros_like(omega)
+    print(f"   Parameters: {count_params(meta_model)/1e6:.2f}M")
+
+    # ── MOML state ─────────────────────────────────────────────────────
+    omega = flat_params(meta_model, device)      # running center  ω
+    lam   = torch.zeros_like(omega)              # dual variable   λ
+
+    # ── Optimiser ──────────────────────────────────────────────────────
     outer_opt = torch.optim.Adam(meta_model.parameters(), lr=cfg.lr_outer)
- 
-    stream = OnlineTaskStream(train_ds.cr_pairs, cfg.pairs_per_task,
-                              cfg.n_tasks, cfg.seed)
-    history = {'tasks': [], 'qry_loss': [], 'qry_mi': [],
-               'val_tasks': [], 'val_mi': []}
+
+    # ── Task stream ────────────────────────────────────────────────────
+    task_stream = OnlineTaskStream(
+        cr_pairs       = train_ds.cr_pairs,
+        pairs_per_task = cfg.pairs_per_task,
+        n_tasks        = cfg.n_tasks,
+        seed           = cfg.seed,
+    )
+
+    # ── History ────────────────────────────────────────────────────────
+    history = {
+        'tasks': [], 'total_loss': [], 'qry_loss': [], 'qry_mi': [],
+        'val_tasks': [], 'val_loss': [], 'val_mi': [],
+    }
     best_val_mi = -float('inf')
- 
-    for t, (spt, qry) in enumerate(tqdm(stream, total=cfg.n_tasks, desc='Tasks')):
-        m = _moml_step(meta_model, spt, qry, train_ds.collate,
-                       omega, lam, cfg, device, outer_opt)
-        if m is None:
+
+    print(f"\n{'='*65}")
+    print("  MOML + DMI  |  encoder from scratch  |  DailyDialog")
+    print(f"{'='*65}")
+    print(f"  n_tasks={cfg.n_tasks}  pairs_per_task={cfg.pairs_per_task}  "
+          f"alpha={cfg.alpha}")
+    print(f"  inner_steps={cfg.num_inner_steps}  lr_inner={cfg.lr_inner}  "
+          f"lr_outer={cfg.lr_outer}")
+    print(f"  batch_size={cfg.batch_size}  estimator={cfg.estimator}")
+    print(f"  d_model={cfg.d_model}  layers={cfg.encoder_layers}  "
+          f"heads={cfg.encoder_heads}")
+    print(f"{'='*65}\n")
+
+    pbar    = tqdm(enumerate(task_stream), total=cfg.n_tasks, desc='Tasks')
+    skipped = 0
+
+    for task_idx, (spt_pairs, qry_pairs) in pbar:
+
+        metrics = moml_task_step(
+            meta_model    = meta_model,
+            support_pairs = spt_pairs,
+            query_pairs   = qry_pairs,
+            collate_fn    = train_ds.collate,
+            omega         = omega,
+            lam           = lam,
+            cfg           = cfg,
+            device        = device,
+            outer_opt     = outer_opt,
+        )
+
+        if metrics is None:
+            skipped += 1
             continue
- 
-        curr = _flat(meta_model, device)
-        lam   = lam   - cfg.alpha * (curr - omega)
-        omega = 0.5 * (curr + omega) - (0.5 / cfg.alpha) * lam
- 
-        if (t + 1) % cfg.log_every == 0:
-            history['tasks'].append(t + 1)
-            history['qry_loss'].append(m['qry_loss'])
-            history['qry_mi'].append(m['qry_mi'])
-            tqdm.write(f"[{t+1:4d}] qry_loss={m['qry_loss']:.4f}  MI≈{m['qry_mi']:.3f}")
- 
-        if (t + 1) % cfg.val_every == 0:
-            vm = validate(meta_model, valid_ds, cfg, device)
-            history['val_tasks'].append(t + 1)
-            history['val_mi'].append(vm['val_mi'])
-            tqdm.write(f"  ▶ val_MI={vm['val_mi']:.4f}")
-            if cfg.save_best and vm['val_mi'] > best_val_mi:
-                best_val_mi = vm['val_mi']
-                torch.save({'task': t+1,
-                            'model_state_dict': meta_model.state_dict(),
-                            'omega': omega.cpu(), 'lambda': lam.cpu(),
-                            'val_mi': best_val_mi, 'cfg': asdict(cfg),
-                            'vocab_size': vocab_size},
-                           os.path.join(cfg.output_path, 'dmi_moml_best.pt'))
-                tqdm.write(f"  ✓ saved (val_MI={best_val_mi:.4f})")
- 
-    torch.save({'task': cfg.n_tasks, 'model_state_dict': meta_model.state_dict(),
-                'omega': omega.cpu(), 'lambda': lam.cpu(),
-                'cfg': asdict(cfg), 'vocab_size': vocab_size},
-               os.path.join(cfg.output_path, 'dmi_moml_final.pt'))
+
+        # ── MOML dual-variable update ───────────────────────────────────
+        #   λ ← λ − α·(θ − ω)
+        #   ω ← ½(θ + ω) − 1/(2α)·λ
+        curr_theta = flat_params(meta_model, device)
+        lam   = lam   - cfg.alpha * (curr_theta - omega)
+        omega = 0.5 * (curr_theta + omega) - (0.5 / cfg.alpha) * lam
+
+        pbar.set_postfix({
+            'L':  f"{metrics['qry_loss']:.3f}",
+            'MI': f"{metrics['qry_mi']:.3f}",
+        })
+
+        if (task_idx + 1) % cfg.log_every == 0:
+            history['tasks'].append(task_idx + 1)
+            history['total_loss'].append(metrics['total_loss'])
+            history['qry_loss'].append(metrics['qry_loss'])
+            history['qry_mi'].append(metrics['qry_mi'])
+            tqdm.write(
+                f"[Task {task_idx+1:4d}]  "
+                f"total_loss={metrics['total_loss']:.4f}  "
+                f"qry_InfoNCE={metrics['qry_loss']:.4f}  "
+                f"qry_MI≈{metrics['qry_mi']:.3f}  "
+                f"spt_batches={metrics['n_spt_b']}"
+            )
+
+        if (task_idx + 1) % cfg.val_every == 0:
+            val_m   = validate(meta_model, valid_ds, cfg, device)
+            val_mi  = val_m['val_mi']
+            val_loss= val_m['val_loss']
+            history['val_tasks'].append(task_idx + 1)
+            history['val_loss'].append(val_loss)
+            history['val_mi'].append(val_mi)
+            tqdm.write(
+                f"\n  ▶ [Val @ task {task_idx+1}]  "
+                f"val_loss={val_loss:.4f}  val_MI≈{val_mi:.4f}"
+            )
+            if cfg.save_best and val_mi > best_val_mi:
+                best_val_mi = val_mi
+                _save_checkpoint(meta_model, outer_opt, omega, lam,
+                                 task_idx + 1, val_mi, cfg, vocab_size,
+                                 name='dmi_moml_best.pt')
+                tqdm.write(
+                    f"  ✓ Checkpoint saved  (best val_MI={best_val_mi:.4f})\n"
+                )
+
+    _save_checkpoint(meta_model, outer_opt, omega, lam,
+                     cfg.n_tasks, best_val_mi, cfg, vocab_size,
+                     name='dmi_moml_final.pt')
+    print(f"\nDone.  Best val MI: {best_val_mi:.4f}  "
+          f"(skipped {skipped} under-sized tasks)")
     return meta_model, history
- 
- 
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Checkpoint helpers
+# ─────────────────────────────────────────────────────────────────────
+
+def _save_checkpoint(model, opt, omega, lam, task, val_mi, cfg,
+                     vocab_size, name):
+    path = os.path.join(cfg.output_path, name)
+    torch.save({
+        'task':             task,
+        'model_state_dict': model.state_dict(),
+        'opt_state_dict':   opt.state_dict(),
+        'omega':            omega.cpu(),
+        'lambda':           lam.cpu(),
+        'val_mi':           val_mi,
+        'cfg':              asdict(cfg),
+        'vocab_size':       vocab_size,
+    }, path)
+    
+
 def load_checkpoint(path: str, device: str):
-    from cog_arch.encoder import DMIScratchEncoder
-    ckpt = torch.load(path, map_location=device)
-    c    = ckpt['cfg']
-    model = DMIScratchEncoder(
-        vocab_size=ckpt['vocab_size'], d_model=c['d_model'],
-        projection_size=c['projection_size'],
-        encoder_layers=c['encoder_layers'], encoder_heads=c['encoder_heads'],
-        dim_feedforward=c['dim_feedforward'],
-        symmetric_loss=c['symmetric_loss'],
+    """
+    Loads a checkpoint and reconstructs the model.
+    Returns (model, omega, lam, cfg_dict, task_idx).
+    """
+    ckpt     = torch.load(path, map_location=device)
+    cfg_dict = ckpt['cfg']
+    model    = DMIScratchEncoder(
+        vocab_size       = ckpt['vocab_size'],
+        d_model          = cfg_dict['d_model'],
+        projection_size  = cfg_dict['projection_size'],
+        encoder_layers   = cfg_dict['encoder_layers'],
+        encoder_heads    = cfg_dict['encoder_heads'],
+        dim_feedforward  = cfg_dict['dim_feedforward'],
+        dropout          = cfg_dict['dropout'],
+        symmetric_loss   = cfg_dict['symmetric_loss'],
     ).to(device)
     model.load_state_dict(ckpt['model_state_dict'])
-    return model, ckpt['omega'].to(device), ckpt['lambda'].to(device), c, ckpt['task']
+    omega = ckpt['omega'].to(device)
+    lam   = ckpt['lambda'].to(device)
+    return model, omega, lam, cfg_dict, ckpt['task']
