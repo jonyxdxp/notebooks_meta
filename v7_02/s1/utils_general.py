@@ -45,7 +45,6 @@ import pickle
 from v7_02.s1.data.dataset import *
 from v7_02.s1.cog_arch.encoder import *
 
-from v7_02.s1.data.dataset import Dataset
 
 # Global parameters
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
