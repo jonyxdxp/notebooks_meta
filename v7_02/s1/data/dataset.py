@@ -147,3 +147,161 @@ class OnlineTaskStream:
             support  = chunk[:half]
             query    = chunk[half:]
             yield support, query
+
+# ─────────────────────────────────────────────────────────────
+# EmpatheticDialogues  —  emotion-aware dataset + task stream
+# ─────────────────────────────────────────────────────────────
+
+import os
+import glob as _glob
+
+
+class EmpatheticDialogDataset:
+    """
+    Loads EmpatheticDialogues from the per-emotion files produced by
+    preprocess_empathetic_dialogues() and exposes:
+
+      self.cr_pairs          — flat list of all (ctx, rsp) tensors
+                               (used for validation, same API as DialogCRDataset)
+      self.emotion_to_pairs  — {emotion_str: [(ctx, rsp), …]}
+                               (fed into EmpatheticTaskStream for training)
+
+    Parameters
+    ----------
+    data_dir    : directory that contains the by_emotion/ sub-folder
+    split       : 'train' or 'valid'
+    tokenizer   : HuggingFace tokenizer
+    max_ctx_len : truncation length for context sequences
+    max_resp_len: truncation length for response sequences
+    """
+
+    EOU = '__eou__'
+
+    def __init__(self, data_dir: str, split: str, tokenizer,
+                 max_ctx_len: int = 150, max_resp_len: int = 60):
+        self.tokenizer   = tokenizer
+        self.max_ctx_len = max_ctx_len
+        self.max_rsp_len = max_resp_len
+        self.pad_id      = tokenizer.pad_token_id
+
+        self.cr_pairs         = []
+        self.emotion_to_pairs = {}
+
+        by_emo_dir = os.path.join(data_dir, 'by_emotion')
+        if not os.path.isdir(by_emo_dir):
+            raise FileNotFoundError(
+                f"by_emotion/ not found under {data_dir}.\n"
+                "Run preprocess_empathetic_dialogues() first."
+            )
+
+        emo_files = sorted(_glob.glob(os.path.join(by_emo_dir, f'*_{split}.txt')))
+        if not emo_files:
+            raise FileNotFoundError(
+                f"No *_{split}.txt files in {by_emo_dir}.\n"
+                "Run preprocess_empathetic_dialogues() first."
+            )
+
+        print(f"Loading EmpatheticDialogues ({split}): {len(emo_files)} emotions")
+        for emo_file in tqdm(emo_files, desc='Emotions', leave=False):
+            emotion = os.path.basename(emo_file).replace(f'_{split}.txt', '')
+            pairs   = self._load_file(emo_file)
+            if pairs:
+                self.emotion_to_pairs[emotion] = pairs
+                self.cr_pairs.extend(pairs)
+
+        print(f"  {len(self.emotion_to_pairs)} emotions  "
+              f"| {len(self.cr_pairs):,} total CR pairs")
+
+    # ── internal ──────────────────────────────────────────────
+    def _load_file(self, path: str):
+        pairs = []
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                turns = line.strip().split(f' {self.EOU} ')
+                turns = [t.strip() for t in turns if t.strip()]
+                if len(turns) < 2:
+                    continue
+                turns = [f"{t} {self.EOU}" for t in turns]
+                for j in range(1, len(turns)):
+                    ctx_text = ' '.join(turns[:j])
+                    rsp_text = turns[j]
+                    ctx_ids  = self.tokenizer.encode(
+                        ctx_text, add_special_tokens=True,
+                        max_length=self.max_ctx_len, truncation=True)
+                    rsp_ids  = self.tokenizer.encode(
+                        rsp_text, add_special_tokens=True,
+                        max_length=self.max_rsp_len, truncation=True)
+                    pairs.append((
+                        torch.tensor(ctx_ids, dtype=torch.long),
+                        torch.tensor(rsp_ids, dtype=torch.long),
+                    ))
+        return pairs
+
+    # ── collation (same API as DialogCRDataset) ───────────────
+    def collate(self, pairs):
+        ctx_list, rsp_list = zip(*pairs)
+        ctx     = pad_sequence(ctx_list, batch_first=True,
+                               padding_value=self.pad_id)
+        rsp     = pad_sequence(rsp_list, batch_first=True,
+                               padding_value=self.pad_id)
+        mask_ctx = (ctx == self.pad_id)
+        mask_rsp = (rsp == self.pad_id)
+        return ctx, rsp, mask_ctx, mask_rsp
+
+
+class EmpatheticTaskStream:
+    """
+    Domain-aware MOML task stream for EmpatheticDialogues.
+
+    Each task = one randomly sampled emotion type.  The inner loop adapts
+    the encoder to that emotion's conversational style; the outer loop
+    evaluates on held-out pairs from the same emotion.  This gives MOML
+    32 distinct task distributions instead of DailyDialog's 1.
+
+    Parameters
+    ----------
+    emotion_to_pairs : dict  {emotion_str: [(ctx_tensor, rsp_tensor), …]}
+                             — from EmpatheticDialogDataset.emotion_to_pairs
+    n_tasks          : int   total number of tasks to yield
+    pairs_per_task   : int   max CR pairs sampled per task (≤ emotion size)
+    seed             : int
+    min_pairs        : int   emotions with fewer pairs are skipped
+    """
+
+    def __init__(
+        self,
+        emotion_to_pairs: dict,
+        n_tasks:          int,
+        pairs_per_task:   int,
+        seed:             int = 42,
+        min_pairs:        int = 32,
+    ):
+        self.emotion_to_pairs = {
+            e: p for e, p in emotion_to_pairs.items() if len(p) >= min_pairs
+        }
+        self.emotions       = sorted(self.emotion_to_pairs.keys())
+        self.n_tasks        = n_tasks
+        self.pairs_per_task = pairs_per_task
+        self.rng            = random.Random(seed)
+
+        skipped = len(emotion_to_pairs) - len(self.emotions)
+        print(f"EmpatheticTaskStream ready: {len(self.emotions)} emotions "
+              f"({skipped} skipped, < {min_pairs} pairs)  "
+              f"| {sum(len(v) for v in self.emotion_to_pairs.values()):,} pairs total")
+
+    def __len__(self):
+        return self.n_tasks
+
+    def __iter__(self):
+        for _ in range(self.n_tasks):
+            emotion = self.rng.choice(self.emotions)
+            pairs   = self.emotion_to_pairs[emotion]
+
+            # Sample up to pairs_per_task without replacement
+            n     = min(len(pairs), self.pairs_per_task)
+            chunk = self.rng.sample(pairs, n)
+
+            half    = max(4, len(chunk) // 2)
+            support = chunk[:half]
+            query   = chunk[half:]
+            yield support, query
