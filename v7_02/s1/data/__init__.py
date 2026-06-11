@@ -1,3 +1,4 @@
-from .dataset import DialogCRDataset, OnlineTaskStream
-from .dataset import EmpatheticDialogDataset, EmpatheticTaskStream
-from .preprocess_empathetic import preprocess_empathetic_dialogues
+from .dataset import (
+    DialogCRDataset, OnlineTaskStream,
+    EmotionAwareDataset, EmotionTaskStream,
+)
