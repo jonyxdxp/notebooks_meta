@@ -21,9 +21,11 @@ torch.backends.cuda.enable_flash_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 torch.backends.cuda.enable_math_sdp(True)
 
-from data.dataset import *
-from cog_arch.encoder import *
-from utils_general import *
+
+
+from v7_02.s1.data.dataset import *
+from v7_02.s1.cog_arch.encoder import *
+from v7_02.s1.utils_general import *
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 data_path      = '/content/drive/MyDrive/data/cache'          # directory, not a file
