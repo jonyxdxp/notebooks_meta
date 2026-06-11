@@ -1,14 +1,18 @@
 """
 preprocess_empathetic.py
 ------------------------
-Downloads EmpatheticDialogues from HuggingFace using direct CSV download
-(no `datasets` library needed — avoids the "Dataset scripts are no longer
-supported" error in datasets >= 3.0).
+Downloads EmpatheticDialogues from Facebook's public CDN and converts it
+to DailyDialog format (one dialog per line, turns joined by ' __eou__ '),
+grouped by emotion type so EmpatheticTaskStream can build domain-aware tasks.
 
-Dataset CSV columns
-~~~~~~~~~~~~~~~~~~~
-conv_id, utterance_idx, context (= emotion), prompt, utterance,
-speaker_idx, tags, selfeval, distractors
+Source
+~~~~~~
+https://dl.fbaipublicfiles.com/parlai/empatheticdialogues/empatheticdialogues.tar.gz
+  └── empatheticdialogues/
+        train.csv   valid.csv   test.csv
+
+CSV columns: conv_id, utterance_idx, context (= emotion label), prompt,
+             utterance, speaker_idx, tags, selfeval, distractors
 
 Output structure
 ~~~~~~~~~~~~~~~~
@@ -25,12 +29,14 @@ Run once:
 """
 
 import os
+import io
 import collections
+import tarfile
+import urllib.request
 
-# ── HuggingFace CSV URLs ───────────────────────────────────────────────
-_HF_BASE = (
-    "https://huggingface.co/datasets/empathetic_dialogues"
-    "/resolve/main/{split}.csv"
+_CDN_URL = (
+    "https://dl.fbaipublicfiles.com/parlai/empatheticdialogues"
+    "/empatheticdialogues.tar.gz"
 )
 
 
@@ -55,63 +61,77 @@ def preprocess_empathetic_dialogues(out_dir: str) -> list:
     by_emo_dir = os.path.join(out_dir, 'by_emotion')
     os.makedirs(by_emo_dir, exist_ok=True)
 
+    # ── Download tar.gz into memory ───────────────────────────────────
+    print(f"Downloading EmpatheticDialogues from Facebook CDN…")
+    print(f"  {_CDN_URL}")
+    req = urllib.request.Request(
+        _CDN_URL,
+        headers={'User-Agent': 'Mozilla/5.0'}
+    )
+    with urllib.request.urlopen(req) as response:
+        raw = response.read()
+    print(f"  Downloaded {len(raw) / 1e6:.1f} MB")
+
+    # ── Open tar in memory, read CSVs ─────────────────────────────────
+    splits_map = {'train': 'train', 'valid': 'valid'}
     all_emotions = []
 
-    for hf_split, suffix in [('train', 'train'), ('valid', 'valid')]:
-        url = _HF_BASE.format(split=hf_split)
-        print(f"Downloading {hf_split} split from HuggingFace…")
-        print(f"  {url}")
+    with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as tar:
+        for hf_split, suffix in splits_map.items():
+            # File inside the archive
+            inner_path = f'empatheticdialogues/{hf_split}.csv'
+            print(f"\nProcessing {inner_path}…")
 
-        df = pd.read_csv(url, on_bad_lines='skip')
-        print(f"  {len(df):,} rows  |  columns: {list(df.columns)}")
+            member = tar.getmember(inner_path)
+            f = tar.extractfile(member)
 
-        # ── reconstruct ordered dialog turns ──────────────────
-        # Group by conv_id, sort by utterance_idx, collect utterances.
-        # Each row's `context` column holds the emotion label for the
-        # whole conversation.
-        convs      = collections.defaultdict(list)   # conv_id → [(idx, text)]
-        emo_of     = {}                               # conv_id → emotion label
+            import pandas as pd
+            df = pd.read_csv(f, on_bad_lines='skip')
+            print(f"  {len(df):,} rows  |  columns: {list(df.columns)}")
 
-        for _, row in df.iterrows():
-            cid  = str(row['conv_id'])
-            idx  = int(row['utterance_idx'])
-            text = str(row['utterance']).strip().replace('\n', ' ')
-            emo  = str(row['context']).strip()
-            convs[cid].append((idx, text))
-            emo_of[cid] = emo
+            # ── reconstruct dialogs ────────────────────────────────────
+            convs  = collections.defaultdict(list)
+            emo_of = {}
 
-        # ── build lines + group by emotion ────────────────────
-        by_emotion = collections.defaultdict(list)
-        all_lines  = []
+            for _, row in df.iterrows():
+                cid  = str(row['conv_id'])
+                idx  = int(row['utterance_idx'])
+                text = str(row['utterance']).strip().replace('\n', ' ')
+                emo  = str(row['context']).strip()
+                convs[cid].append((idx, text))
+                emo_of[cid] = emo
 
-        for cid, turns in convs.items():
-            turns.sort(key=lambda x: x[0])
-            utterances = [t for _, t in turns if t]
-            if len(utterances) < 2:
-                continue
-            emotion = emo_of[cid]
-            line    = ' __eou__ '.join(utterances)
-            all_lines.append(line)
-            by_emotion[emotion].append(line)
+            by_emotion = collections.defaultdict(list)
+            all_lines  = []
 
-        # ── write combined file ────────────────────────────────
-        combined = os.path.join(out_dir, f'dialogues_{suffix}.txt')
-        with open(combined, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(all_lines))
-        print(f"  → {len(all_lines):,} dialogs saved to {combined}")
+            for cid, turns in convs.items():
+                turns.sort(key=lambda x: x[0])
+                utterances = [t for _, t in turns if t and t != 'nan']
+                if len(utterances) < 2:
+                    continue
+                emotion = emo_of[cid]
+                line    = ' __eou__ '.join(utterances)
+                all_lines.append(line)
+                by_emotion[emotion].append(line)
 
-        # ── write per-emotion files ────────────────────────────
-        emotions = sorted(by_emotion.keys())
-        for emotion in emotions:
-            emo_path = os.path.join(by_emo_dir, f'{emotion}_{suffix}.txt')
-            with open(emo_path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(by_emotion[emotion]))
+            # ── write combined file ────────────────────────────────────
+            combined = os.path.join(out_dir, f'dialogues_{suffix}.txt')
+            with open(combined, 'w', encoding='utf-8') as out:
+                out.write('\n'.join(all_lines))
+            print(f"  → {len(all_lines):,} dialogs saved to {combined}")
 
-        if suffix == 'train':
-            all_emotions = emotions
-            print(f"\n  {len(emotions)} emotions found:")
-            for e in emotions:
-                print(f"    {e:30s}: {len(by_emotion[e]):4d} dialogs")
+            # ── write per-emotion files ────────────────────────────────
+            emotions = sorted(by_emotion.keys())
+            for emotion in emotions:
+                emo_path = os.path.join(by_emo_dir, f'{emotion}_{suffix}.txt')
+                with open(emo_path, 'w', encoding='utf-8') as out:
+                    out.write('\n'.join(by_emotion[emotion]))
+
+            if suffix == 'train':
+                all_emotions = emotions
+                print(f"\n  {len(emotions)} emotions:")
+                for e in emotions:
+                    print(f"    {e:30s}: {len(by_emotion[e]):4d} dialogs")
 
     print(f"\nAll done.  Data saved to: {out_dir}")
     return all_emotions

@@ -73,9 +73,10 @@ class MOMLConfig:
     lr_inner:        float = 5e-4
 
     # ── outer loop ────────────────────────────────────────────────────
-    lr_outer:        float = 1e-4
-    batch_size:      int   = 32
-    grad_clip:       float = 1.0
+    lr_outer:          float = 1e-4
+    batch_size:        int   = 32
+    grad_clip:         float = 1.0
+    max_outer_batches: int   = 0    # 0 = use all query batches
 
     # ── logging / ckpt ────────────────────────────────────────────────
     seed:            int   = 42
@@ -168,7 +169,8 @@ def moml_task_step(
                 diffopt.step(spt_loss)
 
         # ── Outer: query InfoNCE (through inner loop) + proximal ──────
-        for qry_b in qry_batches:
+        cap = cfg.max_outer_batches if cfg.max_outer_batches > 0 else len(qry_batches)
+        for qry_b in qry_batches[:cap]:
             ctx, rsp, m_ctx, m_rsp = collate_fn(qry_b)
             ctx, rsp   = ctx.to(device),   rsp.to(device)
             m_ctx, m_rsp = m_ctx.to(device), m_rsp.to(device)
