@@ -785,3 +785,123 @@ def train_MOML_smi_model(model, model_func, trn_ctx, trn_rsp,
         scheduler_.step()
 
     return model
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def train_MOML_DMI_model(model, model_func, trn_task_data, val_task_data, alpha, omega_model, lambda_model, learning_rate,
+                             learning_rate_ft, num_grad_step, batch_size, K, print_per, weight_decay, dataset_name,
+                              sch_step, sch_gamma):
+    model.train()
+    model = model.to(device)
+
+    optimizer_ = torch.optim.SGD(model.parameters(), lr=learning_rate, weight_decay=weight_decay, momentum=0.9)
+    scheduler_ = torch.optim.lr_scheduler.StepLR(optimizer_, step_size=sch_step, gamma=sch_gamma)
+    inner_opt = torch.optim.SGD(model.parameters(), lr=learning_rate_ft, weight_decay=weight_decay)
+
+    # Crear DataLoaders para el support set y query set de la tarea actual
+    num_samples_in_task_trn = len(trn_task_data)
+    num_samples_in_task_val = len(val_task_data)
+
+    if num_samples_in_task_trn < batch_size or num_samples_in_task_val < batch_size:
+        print(f"Advertencia: La tarea actual tiene pocas muestras para support ({num_samples_in_task_trn}) o query ({num_samples_in_task_val}). Se saltará esta tarea.")
+        return model, 0.0 # Devolver el modelo sin cambios y una pérdida de 0
+
+    support_loader = DataLoader(trn_task_data, batch_size=batch_size, shuffle=True)
+    query_loader = DataLoader(val_task_data, batch_size=batch_size, shuffle=True)
+
+    for k_step in range(K): # K es el número de meta-actualizaciones
+        # Samplear un batch para el support set y otro para el query set
+        try:
+            curr_trn_batch = next(iter(support_loader))
+            curr_val_batch = next(iter(query_loader))
+        except StopIteration:
+            # Si un DataLoader se agota, reiniciarlo
+            support_loader = DataLoader(trn_task_data, batch_size=batch_size, shuffle=True)
+            query_loader = DataLoader(val_task_data, batch_size=batch_size, shuffle=True)
+            curr_trn_batch = next(iter(support_loader))
+            curr_val_batch = next(iter(query_loader))
+
+        optimizer_.zero_grad()
+        with higher.innerloop_ctx(model, inner_opt, copy_initial_weights=False) as (fnet, diffopt):
+            # Bucle interno para adaptar el modelo a la tarea (support set)
+            c_t_trn, z_t_trn = fnet(curr_trn_batch)
+            trn_loss = fnet.compute_dmi_loss(c_t_trn, z_t_trn)
+            diffopt.step(trn_loss)
+
+            # Calcular la pérdida en el query set para el meta-gradiente
+            c_t_val, z_t_val = fnet(curr_val_batch)
+            val_loss = fnet.compute_dmi_loss(c_t_val, z_t_val)
+
+            # Propagar el meta-gradiente
+            val_loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=3) # max_norm de MOML
+        optimizer_.step()
+        scheduler_.step() # Actualizar el learning rate del meta-optimizador
+
+        if (k_step + 1) % print_per == 0:
+            print(f"  Meta-step {k_step+1}/{K}, Val Loss: {val_loss.item():.4f}")
+
+    # Después de K meta-actualizaciones, actualizar omega_model y lambda_model
+    # Asegurarse de que omega_model y lambda_model sean tensores de PyTorch
+    omega_model_tensor = omega_model.clone().detach().to(device) if isinstance(omega_model, np.ndarray) else omega_model.clone().detach().to(device)
+    lambda_model_tensor = lambda_model.clone().detach().to(device) if isinstance(lambda_model, np.ndarray) else lambda_model.clone().detach().to(device)
+
+    curr_par = get_mdl_params([model], n_par=len(omega_model_tensor))[0]
+    lambda_model_tensor = lambda_model_tensor - alpha * (curr_par - omega_model_tensor)
+    omega_model_tensor = 1 / 2 * (curr_par + omega_model_tensor) - 1 / 2 * 1 / alpha * lambda_model_tensor
+
+    return model, val_loss.item(), omega_model_tensor, lambda_model_tensor
+
+
+def train_MOML_DMI(data_obj, alpha, learning_rate, learning_rate_ft, batch_size, K, num_grad_step,
+               print_per, weight_decay, model_func, init_model, sch_step, sch_gamma, lr_decay_per_round,
+               save_models, save_performance, save_tensorboard, suffix=\'\', data_path=\'\'):
+    
+    # Inicializar modelo meta
+    meta_model = model_func().to(device)
+    meta_model.load_state_dict(copy.deepcopy(dict(init_model.named_parameters())), strict=False)
+
+    omega_model = get_mdl_params([init_model])[0]
+    n_par = omega_model.shape[0]
+    lambda_model = torch.zeros(n_par, dtype=torch.float32, device=device)  # Start from all 0s
+
+    all_task_losses = []
+
+    # Bucle sobre las tareas
+    for task_idx in tqdm(range(data_obj.num_tasks), desc="Training MOML on DMI tasks"):
+        print(f"\n---- Tarea {task_idx + 1}/{data_obj.num_tasks} ----")
+        current_task_samples = data_obj[task_idx] # Obtener las muestras para la tarea actual
+
+        # Dividir la tarea en support y query sets para el entrenamiento y evaluación
+        num_samples_in_task = len(current_task_samples)
+        if num_samples_in_task < 2 * batch_size:
+            print(f"Saltando tarea {task_idx+1} debido a pocas muestras ({num_samples_in_task}).")
+            continue
+        
+        np.random.shuffle(current_task_samples)
+        support_set = current_task_samples[:num_samples_in_task // 2]
+        query_set = current_task_samples[num_samples_in_task // 2:]
+
+        # Entrenar el modelo MOML en la tarea actual
+        meta_model, current_task_loss, omega_model, lambda_model = train_MOML_DMI_model(meta_model, model_func, support_set, query_set, alpha, omega_model, lambda_model,
+                                                         learning_rate * (lr_decay_per_round ** task_idx), learning_rate_ft, num_grad_step, batch_size, K,
+                                                         print_per, weight_decay, data_obj.dataset, sch_step, sch_gamma)
+        all_task_losses.append(current_task_loss)
+        print(f"Pérdida de la tarea {task_idx+1}: {current_task_loss:.4f}")
+
+    print("\n--- Entrenamiento MOML-DMI Completado ---")
+    print(f"Pérdidas promedio por tarea: {np.mean(all_task_losses):.4f}")
+    return meta_model, all_task_losses
