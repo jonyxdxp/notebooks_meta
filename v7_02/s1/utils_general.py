@@ -42,7 +42,6 @@ import higher
 import pickle
 
 
-from data.dataset import *
 from cog_arch.encoder import *
 
 from data.dataset import Dataset
