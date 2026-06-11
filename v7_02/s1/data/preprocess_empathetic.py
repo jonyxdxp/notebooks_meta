@@ -42,7 +42,6 @@ import json
 import os
 from collections import defaultdict
 from pathlib import Path
-import pandas as pd, urllib.request, tempfile, os as _os
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -77,25 +76,19 @@ def preprocess_empathetic(output_dir: str, verbose: bool = True) -> dict:
         if verbose:
             print(f"\nProcessing split: {hf_split} …")
 
-        url = f'{_FB}/{_fname[hf_split]}.csv'
-        if verbose:
-            print(f"  Downloading {url}")
-        tmp = tempfile.NamedTemporaryFile(suffix='.csv', delete=False)
-        urllib.request.urlretrieve(url, tmp.name)
-        df = pd.read_csv(tmp.name, on_bad_lines='skip')
-        _os.unlink(tmp.name)
-        df.columns = [c.strip() for c in df.columns]   # strip whitespace
+        from datasets import load_dataset
+        ds = load_dataset('facebook/empathetic_dialogues', split=hf_split)
 
         # ── Group rows by conversation ─────────────────────────────────
         convs    = defaultdict(list)
         emotions = {}
 
-        for _, row in df.iterrows():
-            cid  = str(row['conv_id']).strip()
-            text = str(row['utterance']).replace('_comma_', ',').strip()
-            convs[cid].append((int(row['utterance_idx']), text))
+        for row in ds:
+            cid  = row['conv_id']
+            text = row['utterance'].replace('_comma_', ',').strip()
+            convs[cid].append((row['utterance_idx'], text))
             if cid not in emotions:
-                emotions[cid] = str(row['context']).strip()
+                emotions[cid] = row['context'].strip()
 
         # ── Sort turns and build flat dialog list ──────────────────────
         dialog_lines   = []
