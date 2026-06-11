@@ -13,6 +13,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# ── Fix: `higher` cannot differentiate through PyTorch's efficient-attention
+# ── kernel (aten::_scaled_dot_product_efficient_attention_backward is not
+# ── implemented for autograd).  Force the standard math backend, which has
+# ── a full backward pass, so the MOML inner loop remains differentiable.
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+
 
 # ─────────────────────────────────────────────────────────────
 # Building blocks
