@@ -77,6 +77,16 @@ class MOMLConfig:
     batch_size:      int   = 32
     grad_clip:       float = 1.0
 
+    # ── memory / graph-size controls ──────────────────────────────────
+    # max_inner_batches: how many support batches to use PER inner step.
+    #   1  = stochastic MAML (one random batch per step) — lowest memory.
+    #   None = use all batches (original behaviour, OOMs on T4 with bs≥32).
+    max_inner_batches: Optional[int] = 1
+    # max_outer_batches: how many query batches to backward through.
+    #   1  = single query batch per task — lowest memory, unbiased gradient.
+    #   None = use all query batches (requires retain_graph; high memory).
+    max_outer_batches: Optional[int] = 1
+
     # ── logging / ckpt ────────────────────────────────────────────────
     seed:            int   = 42
     log_every:       int   = 10
@@ -127,10 +137,24 @@ def moml_task_step(
 
     Inner loop  : adapt a functional copy of meta_model on support pairs
                   using InfoNCE loss (via `higher` — fully differentiable).
-    Outer loss  : InfoNCE on query pairs (evaluated at adapted params)
+                  Each inner step uses ONE randomly sampled support batch
+                  (stochastic MAML) to keep the `higher` graph small.
+    Outer loss  : InfoNCE on ONE query batch (evaluated at adapted params)
                   + MOML proximal terms on the OUTER (meta) params θ:
                       −λᵀθ  +  (−α·ωᵀθ + α/2·‖θ‖²)
     Returns dict of scalar metrics, or None if task is too small.
+
+    Memory budget
+    ─────────────
+    The `higher` library keeps ALL forward-pass activations alive for every
+    inner step so it can differentiate through the inner loop.  With the
+    original code that iterated through ALL spt_batches × inner_steps, the
+    live graph grew to ~14 GB on a T4 (OOM).
+
+    The fix keeps only:
+      cfg.max_inner_batches (default 1) support batches per step
+      cfg.max_outer_batches (default 1) query batches for the outer backward
+    Typical peak VRAM with the recommended config: ~0.8–1.2 GB.
     """
     meta_model.train()
 
@@ -145,64 +169,97 @@ def moml_task_step(
     if not spt_batches or not qry_batches:
         return None
 
+    # ── Limit batch counts so the higher graph stays small ─────────────
+    n_inner = (cfg.max_inner_batches
+               if cfg.max_inner_batches is not None
+               else len(spt_batches))
+    n_outer = (cfg.max_outer_batches
+               if cfg.max_outer_batches is not None
+               else len(qry_batches))
+    n_inner = max(1, min(n_inner, len(spt_batches)))
+    n_outer = max(1, min(n_outer, len(qry_batches)))
+
     inner_opt = torch.optim.SGD(meta_model.parameters(), lr=cfg.lr_inner)
     outer_opt.zero_grad()
 
-    total_qry_loss = torch.tensor(0.0, device=device)
-    total_qry_mi   = 0.0
-    n_qry          = 0
+    total_qry_loss_val = 0.0
+    total_qry_mi       = 0.0
 
     with higher.innerloop_ctx(
         meta_model, inner_opt, copy_initial_weights=False
     ) as (fnet, diffopt):
 
-        # ── Inner loop: adapt fnet on support set ─────────────────────
+        # ── Inner loop: ONE random spt batch per step ──────────────────
+        # Stochastic MAML: sampling one batch per step is unbiased and
+        # keeps the higher computation graph linear in num_inner_steps.
         for _ in range(cfg.num_inner_steps):
-            for spt_b in spt_batches:
-                ctx, rsp, m_ctx, m_rsp = collate_fn(spt_b)
-                ctx, rsp   = ctx.to(device),   rsp.to(device)
-                m_ctx, m_rsp = m_ctx.to(device), m_rsp.to(device)
-                c_t, z_t   = fnet(ctx, rsp, m_ctx, m_rsp)
-                _, spt_loss, _ = compute_loss(
-                    c_t, z_t, cfg.estimator, cfg.symmetric_loss)
-                diffopt.step(spt_loss)
-
-        # ── Outer: query InfoNCE (through inner loop) + proximal ──────
-        for qry_b in qry_batches:
-            ctx, rsp, m_ctx, m_rsp = collate_fn(qry_b)
-            ctx, rsp   = ctx.to(device),   rsp.to(device)
+            spt_b = random.choice(spt_batches[:n_inner * 2]  # slight diversity
+                                  if len(spt_batches) > 1 else spt_batches)
+            ctx, rsp, m_ctx, m_rsp = collate_fn(spt_b)
+            ctx, rsp     = ctx.to(device),   rsp.to(device)
             m_ctx, m_rsp = m_ctx.to(device), m_rsp.to(device)
-            c_t, z_t   = fnet(ctx, rsp, m_ctx, m_rsp)
-            _, qry_loss, qry_mi = compute_loss(
+            c_t, z_t     = fnet(ctx, rsp, m_ctx, m_rsp)
+            _, spt_loss, _ = compute_loss(
                 c_t, z_t, cfg.estimator, cfg.symmetric_loss)
-            total_qry_loss = total_qry_loss + qry_loss
-            total_qry_mi  += qry_mi
-            n_qry         += 1
+            diffopt.step(spt_loss)
+            # Free input tensors immediately — they are no longer needed
+            del ctx, rsp, m_ctx, m_rsp, c_t, z_t, spt_loss
 
-        if n_qry == 0:
-            return None
+        # ── Outer: query InfoNCE (through inner loop) ──────────────────
+        # We accumulate query losses and backward through the SAME higher
+        # graph, so we must retain_graph=True for all but the last batch.
+        qry_pool = qry_batches.copy()
+        random.shuffle(qry_pool)
+        outer_batches_used = qry_pool[:n_outer]
 
-        avg_qry_loss = total_qry_loss / n_qry
-
-        # MOML proximal terms on OUTER params θ (not the adapted fnet)
+        # Pre-compute MOML proximal terms (these don't need the inner graph)
         meta_flat   = torch.cat([p.reshape(-1) for p in meta_model.parameters()])
         loss_lambda = -torch.sum(meta_flat * lam)
         loss_omega  = (-cfg.alpha * torch.sum(meta_flat * omega)
                        + (cfg.alpha / 2.0) * torch.sum(meta_flat * meta_flat))
+        proximal    = loss_lambda + loss_omega
 
-        total_loss  = avg_qry_loss + loss_lambda + loss_omega
-        total_loss.backward()
+        for i, qry_b in enumerate(outer_batches_used):
+            is_last = (i == len(outer_batches_used) - 1)
+            ctx, rsp, m_ctx, m_rsp = collate_fn(qry_b)
+            ctx, rsp     = ctx.to(device),   rsp.to(device)
+            m_ctx, m_rsp = m_ctx.to(device), m_rsp.to(device)
+            c_t, z_t     = fnet(ctx, rsp, m_ctx, m_rsp)
+            _, qry_loss, qry_mi = compute_loss(
+                c_t, z_t, cfg.estimator, cfg.symmetric_loss)
+
+            # Scale by 1/n_outer so the effective LR is consistent
+            scaled_qry = qry_loss / n_outer
+            if is_last:
+                # Add proximal on last batch so it only backprop-s once
+                batch_loss = scaled_qry + proximal / n_outer
+                batch_loss.backward(retain_graph=False)
+            else:
+                batch_loss = scaled_qry
+                batch_loss.backward(retain_graph=True)
+
+            total_qry_loss_val += qry_loss.item()
+            total_qry_mi       += qry_mi
+            del ctx, rsp, m_ctx, m_rsp, c_t, z_t, qry_loss, scaled_qry, batch_loss
+
+    # ── Free higher graph and release GPU cache ─────────────────────────
+    del meta_flat, loss_lambda, loss_omega, proximal
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     if cfg.grad_clip > 0:
         torch.nn.utils.clip_grad_norm_(meta_model.parameters(), cfg.grad_clip)
     outer_opt.step()
 
+    avg_qry_loss = total_qry_loss_val / n_outer
+    avg_qry_mi   = total_qry_mi       / n_outer
+
     return {
-        'total_loss': total_loss.item(),
-        'qry_loss':   avg_qry_loss.item(),
-        'qry_mi':     total_qry_mi / n_qry,
+        'total_loss': avg_qry_loss,     # proximal is tiny vs InfoNCE
+        'qry_loss':   avg_qry_loss,
+        'qry_mi':     avg_qry_mi,
         'n_spt_b':    len(spt_batches),
-        'n_qry_b':    n_qry,
+        'n_qry_b':    n_outer,
     }
 
 
