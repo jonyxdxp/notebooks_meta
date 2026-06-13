@@ -271,30 +271,64 @@ def moml_task_step(
 # ─────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def validate(meta_model, valid_ds, cfg: MOMLConfig, device: str) -> dict:
+def validate(meta_model, valid_ds, cfg, device):
+    """
+    MAML-style validation: for each emotion, adapt K steps on support,
+    measure MI on query.  This is what MOML actually optimises for.
+    """
+    import higher, copy
     meta_model.eval()
-    pairs = list(valid_ds.cr_pairs)
-    random.shuffle(pairs)
-    batches = [pairs[i:i+cfg.batch_size]
-               for i in range(0, len(pairs), cfg.batch_size)
-               if len(pairs[i:i+cfg.batch_size]) >= 8]
-    batches = batches[:cfg.val_batches]
 
-    total_loss, total_mi, n = 0.0, 0.0, 0
-    for b in batches:
-        ctx, rsp, m_ctx, m_rsp = valid_ds.collate(b)
-        ctx, rsp   = ctx.to(device),   rsp.to(device)
-        m_ctx, m_rsp = m_ctx.to(device), m_rsp.to(device)
-        c_t, z_t   = meta_model(ctx, rsp, m_ctx, m_rsp)
-        _, loss, mi = compute_loss(c_t, z_t, cfg.estimator, cfg.symmetric_loss)
-        total_loss += loss.item()
+    # Group val pairs by emotion
+    if hasattr(valid_ds, 'pairs_by_emotion'):
+        buckets = valid_ds.pairs_by_emotion()
+    else:
+        # Fallback: treat all pairs as one task
+        buckets = {'all': list(valid_ds.cr_pairs)}
+
+    total_mi, total_loss, n_tasks = 0.0, 0.0, 0
+
+    for emotion, pairs in buckets.items():
+        if len(pairs) < cfg.batch_size * 2:
+            continue
+        random.shuffle(pairs)
+        half    = len(pairs) // 2
+        spt     = pairs[:half]
+        qry     = pairs[half:half + cfg.batch_size]
+        if len(qry) < 8:
+            continue
+
+        # Inner adaptation (no gradient tracking needed for val)
+        adapted = copy.deepcopy(meta_model)
+        adapted.train()
+        inner_opt = torch.optim.SGD(adapted.parameters(), lr=cfg.lr_inner)
+
+        for _ in range(cfg.num_inner_steps):
+            b = random.sample(spt, min(cfg.batch_size, len(spt)))
+            ctx, rsp, mc, mr = valid_ds.collate(b)
+            ctx, rsp, mc, mr = (ctx.to(device), rsp.to(device),
+                                 mc.to(device),  mr.to(device))
+            c_t, z_t = adapted(ctx, rsp, mc, mr)
+            _, loss, _ = compute_loss(c_t, z_t, cfg.estimator, cfg.symmetric_loss)
+            inner_opt.zero_grad(); loss.backward(); inner_opt.step()
+
+        # Measure on query
+        adapted.eval()
+        with torch.no_grad():
+            ctx, rsp, mc, mr = valid_ds.collate(qry)
+            ctx, rsp, mc, mr = (ctx.to(device), rsp.to(device),
+                                 mc.to(device),  mr.to(device))
+            c_t, z_t = adapted(ctx, rsp, mc, mr)
+            _, loss, mi = compute_loss(c_t, z_t, cfg.estimator, cfg.symmetric_loss)
         total_mi   += mi
-        n          += 1
+        total_loss += loss.item()
+        n_tasks    += 1
+        del adapted
 
     meta_model.train()
     return {
-        'val_loss': total_loss / n if n else 0.0,
-        'val_mi':   total_mi   / n if n else 0.0,
+        'val_loss': total_loss / n_tasks if n_tasks else 0.0,
+        'val_mi':   total_mi   / n_tasks if n_tasks else 0.0,
     }
 
 
