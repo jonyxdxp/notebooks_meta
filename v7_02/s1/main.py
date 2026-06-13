@@ -270,20 +270,19 @@ def moml_task_step(
 # Validation
 # ─────────────────────────────────────────────────────────────────────
 
-@torch.no_grad()
+# In main.py — replace the validate function (remove @torch.no_grad() decorator)
+
 def validate(meta_model, valid_ds, cfg, device):
     """
-    MAML-style validation: for each emotion, adapt K steps on support,
-    measure MI on query.  This is what MOML actually optimises for.
+    MAML-style validation: adapt K steps on support, measure MI on query.
+    No @torch.no_grad() decorator — the inner loop needs gradients.
     """
-    import higher, copy
+    import copy
     meta_model.eval()
 
-    # Group val pairs by emotion
     if hasattr(valid_ds, 'pairs_by_emotion'):
         buckets = valid_ds.pairs_by_emotion()
     else:
-        # Fallback: treat all pairs as one task
         buckets = {'all': list(valid_ds.cr_pairs)}
 
     total_mi, total_loss, n_tasks = 0.0, 0.0, 0
@@ -292,14 +291,14 @@ def validate(meta_model, valid_ds, cfg, device):
         if len(pairs) < cfg.batch_size * 2:
             continue
         random.shuffle(pairs)
-        half    = len(pairs) // 2
-        spt     = pairs[:half]
-        qry     = pairs[half:half + cfg.batch_size]
+        half = len(pairs) // 2
+        spt  = pairs[:half]
+        qry  = pairs[half:half + cfg.batch_size]
         if len(qry) < 8:
             continue
 
-        # Inner adaptation (no gradient tracking needed for val)
-        adapted = copy.deepcopy(meta_model)
+        # Inner adaptation — needs gradients, so NO torch.no_grad() here
+        adapted   = copy.deepcopy(meta_model)
         adapted.train()
         inner_opt = torch.optim.SGD(adapted.parameters(), lr=cfg.lr_inner)
 
@@ -310,9 +309,11 @@ def validate(meta_model, valid_ds, cfg, device):
                                  mc.to(device),  mr.to(device))
             c_t, z_t = adapted(ctx, rsp, mc, mr)
             _, loss, _ = compute_loss(c_t, z_t, cfg.estimator, cfg.symmetric_loss)
-            inner_opt.zero_grad(); loss.backward(); inner_opt.step()
+            inner_opt.zero_grad()
+            loss.backward()
+            inner_opt.step()
 
-        # Measure on query
+        # Query measurement — no gradients needed here
         adapted.eval()
         with torch.no_grad():
             ctx, rsp, mc, mr = valid_ds.collate(qry)
@@ -320,10 +321,12 @@ def validate(meta_model, valid_ds, cfg, device):
                                  mc.to(device),  mr.to(device))
             c_t, z_t = adapted(ctx, rsp, mc, mr)
             _, loss, mi = compute_loss(c_t, z_t, cfg.estimator, cfg.symmetric_loss)
+
         total_mi   += mi
         total_loss += loss.item()
         n_tasks    += 1
         del adapted
+        torch.cuda.empty_cache()
 
     meta_model.train()
     return {
