@@ -267,6 +267,10 @@ def evaluate_all_conditions(moml_ckpt_path, pretrain_ckpt, test_ds,
     return results
 
 
+
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Pretty printer
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,11 +288,17 @@ def print_results(results):
     print(hdr)
     print("="*len(hdr))
     for key, label in labels.items():
-        if key not in results: continue
+        if key not in results:
+            continue
         m = results[key]['macro']
+        if not m or 'R@1' not in m:          # ← guard
+            print(f"{label:<42}  (no emotions had enough pairs — "
+                  f"reduce n_support)")
+            continue
         print(f"{label:<42}  {m['R@1']:>6.3f}  {m['R@2']:>6.3f}  "
               f"{m['R@5']:>6.3f}  {m['MRR']:>6.3f}")
     print("="*len(hdr))
+    # ... rest unchanged
 
     if 'C_moml_adapted' in results and 'B_pretrain_adapted' in results:
         delta = (results['C_moml_adapted']['macro']['R@1'] -
