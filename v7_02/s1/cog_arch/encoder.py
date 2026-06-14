@@ -122,7 +122,10 @@ class DMIScratchEncoder(nn.Module):
         )
 
         # Linear projection on the response side only (matches DMI's Projection)
-        self.proj = nn.Linear(d_model, projection_size, bias=False)
+        self.proj = nn.Sequential(
+            nn.Linear(d_model, projection_size, bias=False),
+            nn.BatchNorm1d(projection_size),
+        )
 
         self._reset_parameters()
 
@@ -145,13 +148,12 @@ class DMIScratchEncoder(nn.Module):
 
     # ── forward ───────────────────────────────────────────────
     def forward(self, context, response, mask_ctx, mask_rsp):
-        """
-        Returns c_t (context repr) and z_t (projected response repr).
-        Masks: True = padding position.
-        """
-        c_t = self._encode(context, mask_ctx)       # (B, d_model)
-        r_t = self._encode(response, mask_rsp)      # (B, d_model)
-        z_t = self.proj(r_t)                        # (B, projection_size)
+        c_t = self._encode(context, mask_ctx)
+        r_t = self._encode(response, mask_rsp)
+        z_t = self.proj(r_t)
+        # L2 normalize both sides — prevents dimensional collapse
+        c_t = F.normalize(c_t, dim=-1)
+        z_t = F.normalize(z_t, dim=-1)
         return c_t, z_t
 
     def encode_context(self, context, mask_ctx):
@@ -164,22 +166,17 @@ class DMIScratchEncoder(nn.Module):
 #                  inlined here so this file is self-contained)
 # ─────────────────────────────────────────────────────────────
 
-def infonce_loss(c_t: torch.Tensor, z_t: torch.Tensor,
-                 symmetric: bool = False):
-    """
-    InfoNCE (NT-Xent with temperature=1).
-    Matches SMI._compute_loss() exactly.
-    Returns: (score_matrix, loss_scalar, mi_estimate_scalar)
-    """
-    score = torch.mm(c_t, z_t.t())              # (B, B)
-    log_p = F.log_softmax(score, dim=1)
+def infonce_loss(c_t, z_t, temperature=0.07, symmetric=False):
+    # Vectors already normalized — dot product = cosine similarity
+    score   = torch.mm(c_t, z_t.t()) / temperature
+    log_p   = F.log_softmax(score, dim=1)
     if symmetric:
         log_p0 = F.log_softmax(score, dim=0)
-        loss = (-0.5 * torch.mean(torch.diag(log_p))
-                - 0.5 * torch.mean(torch.diag(log_p0)))
+        loss   = -0.5 * torch.mean(torch.diag(log_p)) \
+                 -0.5 * torch.mean(torch.diag(log_p0))
     else:
         loss = -torch.mean(torch.diag(log_p))
-    mi = math.log(c_t.shape[0]) - loss.item()
+    mi = math.log(c_t.shape[0]) - loss.item() * temperature
     return score, loss, mi
 
 
