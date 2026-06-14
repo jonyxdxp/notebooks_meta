@@ -8,33 +8,27 @@ Protocol (standard for dialog response retrieval)
 For each query (context utterance):
   1. Pool of candidates = 1 correct response + 99 random negatives
   2. Rank candidates by cosine similarity to context encoding
-  3. Measure R@1 (is the correct response ranked 1st?), R@2, MRR
+  3. Measure R@1, R@2, R@5, MRR
 
 Three conditions compared
 ──────────────────────────
-  A. Random init    — freshly initialised encoder, no adaptation
-  B. Pretrain only  — InfoNCE pretrained, NO test-time adaptation
-  C. MOML + adapt   — MOML meta-init + K inner steps on support pairs
-
-If C > B > A:  MOML meta-learning is working as intended.
-If C ≈ B > A:  Pretrain is doing the work; MOML doesn't help.
-If C ≈ B ≈ A:  Neither pretrain nor MOML helped — data/arch problem.
+  A   Random init          (no adapt)
+  B   Pretrain static      (no adapt)
+  B+  Pretrain + adapt
+  C   MOML static          (no adapt)
+  C*  MOML + adapt         ← target
 
 Usage
 ─────
-    from evaluate import evaluate_all_conditions, print_results
+    from v7_02.s1.eval.evaluate import evaluate_all_conditions, print_results
 
     results = evaluate_all_conditions(
-        moml_ckpt_path = '/content/drive/MyDrive/dmi_moml_ckpts/dmi_moml_best.pt',
-        pretrain_ckpt  = '/content/drive/MyDrive/dmi_moml_ckpts/dmi_pretrain_best.pt',
-        test_ds        = em_test_ds,          # EmotionAwareDataset, test split
+        moml_ckpt_path = '.../dmi_moml_best.pt',
+        pretrain_ckpt  = '.../dmi_pretrain_best.pt',
+        test_ds        = em_test_ds,
         tokenizer      = tokenizer,
         vocab_size     = vocab_size,
         device         = device,
-        n_candidates   = 100,
-        n_support      = 50,
-        n_inner_steps  = 5,
-        lr_inner       = 1e-2,
     )
     print_results(results)
 """
@@ -43,194 +37,90 @@ from __future__ import annotations
 
 import copy
 import random
+import sys
+import os
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from test_time_adapt import test_time_adapt, encode_utterances
+# ── robust import of test_time_adapt regardless of working directory ──────────
+try:
+    from v7_02.s1.adapt.test_time_adapt import encode_utterances
+except ModuleNotFoundError:
+    # Fallback: add repo root to path and try again
+    _here = os.path.dirname(os.path.abspath(__file__))          # .../eval/
+    _root = os.path.dirname(os.path.dirname(os.path.dirname(_here)))  # repo root
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
+    from v7_02.s1.adapt.test_time_adapt import encode_utterances
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Retrieval metrics
 # ─────────────────────────────────────────────────────────────────────────────
 
-def retrieval_metrics(
-    ctx_vecs:  np.ndarray,   # (N, d)  context representations
-    rsp_vecs:  np.ndarray,   # (N, d)  correct response representations
-    all_rsp:   np.ndarray,   # (M, d)  all response candidates (M >> N)
-    n_cands:   int = 100,
-) -> dict:
+def retrieval_metrics(ctx_vecs, rsp_vecs, all_rsp, n_cands=100):
     """
     For each context i:
-      - candidates = [rsp_vecs[i]] + (n_cands-1) random negatives from all_rsp
-      - rank candidates by cosine similarity to ctx_vecs[i]
-      - record rank of the correct response
-
-    Returns dict with R@1, R@2, R@5, MRR.
+      candidates = [rsp_vecs[i]] + (n_cands-1) random negatives from all_rsp
+      rank by cosine similarity, record rank of correct response.
+    Returns dict: R@1, R@2, R@5, MRR, median_rank.
     """
-    N        = len(ctx_vecs)
-    ranks    = []
-    rng      = np.random.RandomState(42)
-
-    # Pre-build negative pool (exclude correct responses)
-    neg_pool = all_rsp   # use all_rsp as pool; collision probability is tiny
+    N   = len(ctx_vecs)
+    rng = np.random.RandomState(42)
+    ranks = []
 
     for i in range(N):
-        # Sample n_cands-1 negatives (may accidentally include true response
-        # with tiny probability — acceptable for large pools)
-        neg_idx  = rng.choice(len(neg_pool), size=n_cands - 1, replace=False)
-        negs     = neg_pool[neg_idx]                          # (n_cands-1, d)
-        cands    = np.concatenate([rsp_vecs[i:i+1], negs], axis=0)  # (n_cands, d)
-
-        # Cosine similarity (vectors are L2-normalised so dot = cosine)
-        scores   = cands @ ctx_vecs[i]                        # (n_cands,)
-        order    = np.argsort(-scores)                        # descending
-        rank     = int(np.where(order == 0)[0][0]) + 1       # 1-indexed
+        neg_idx = rng.choice(len(all_rsp), size=min(n_cands - 1, len(all_rsp) - 1),
+                             replace=False)
+        negs    = all_rsp[neg_idx]
+        cands   = np.concatenate([rsp_vecs[i:i+1], negs], axis=0)
+        scores  = cands @ ctx_vecs[i]
+        order   = np.argsort(-scores)
+        rank    = int(np.where(order == 0)[0][0]) + 1
         ranks.append(rank)
 
     ranks = np.array(ranks)
     return {
-        'R@1':  float(np.mean(ranks == 1)),
-        'R@2':  float(np.mean(ranks <= 2)),
-        'R@5':  float(np.mean(ranks <= 5)),
-        'MRR':  float(np.mean(1.0 / ranks)),
+        'R@1':         float(np.mean(ranks == 1)),
+        'R@2':         float(np.mean(ranks <= 2)),
+        'R@5':         float(np.mean(ranks <= 5)),
+        'MRR':         float(np.mean(1.0 / ranks)),
         'median_rank': float(np.median(ranks)),
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-emotion evaluation
+# Inner adaptation on CR pairs (used inside evaluate, no external dependency)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def evaluate_one_condition(
-    model,
-    test_ds,
-    tokenizer,
-    device:       str,
-    n_candidates: int   = 100,
-    n_support:    int   = 50,
-    n_inner_steps:int   = 5,
-    lr_inner:     float = 1e-2,
-    adapt:        bool  = False,
-    verbose:      bool  = True,
-) -> dict:
-    """
-    Evaluate one encoder condition on the test set.
-
-    If adapt=True: for each emotion, adapt the encoder on n_support pairs
-    first, then evaluate on the remaining pairs.
-    If adapt=False: use the encoder as-is.
-
-    Returns per-emotion metrics and macro-averaged metrics.
-    """
-    if not hasattr(test_ds, 'pairs_by_emotion'):
-        raise ValueError("test_ds must be EmotionAwareDataset "
-                         "(needs pairs_by_emotion() method)")
-
-    buckets = test_ds.pairs_by_emotion()
-    per_emotion = {}
-
-    # Build global response pool for negative sampling
-    all_responses = []
-    for pairs in buckets.values():
-        for _, rsp in pairs:
-            all_responses.append(rsp)
-
-    # Encode all responses once with the base model for the negative pool
-    # (we'll re-encode for each condition as needed)
-
-    macro = defaultdict(list)
-
-    for emotion, pairs in buckets.items():
-        if len(pairs) < n_support + 10:
-            continue   # not enough pairs for support + query
-
-        random.shuffle(pairs)
-        support = pairs[:n_support]
-        query   = pairs[n_support:]
-
-        # ── Optional: adapt encoder on support ───────────────────────────────
-        if adapt and len(support) >= 4:
-            # Convert support pairs to conversation-like turns
-            # We adapt using the (ctx, rsp) pairs directly via InfoNCE
-            eval_model = _adapt_on_pairs(
-                model, support, tokenizer, device,
-                n_inner_steps, lr_inner, test_ds.pad_id)
-        else:
-            eval_model = model
-
-        # ── Encode query contexts and responses ───────────────────────────────
-        ctx_texts = []
-        rsp_texts = []
-        for ctx_ids, rsp_ids in query[:200]:   # cap at 200 for speed
-            ctx_texts.append(tokenizer.decode(
-                ctx_ids.tolist(), skip_special_tokens=True))
-            rsp_texts.append(tokenizer.decode(
-                rsp_ids.tolist(), skip_special_tokens=True))
-
-        ctx_vecs = encode_utterances(eval_model, ctx_texts, tokenizer, device)
-        rsp_vecs = encode_utterances(eval_model, rsp_texts, tokenizer, device)
-
-        # Build response pool from all other emotions (strong negatives)
-        neg_texts = []
-        for other_em, other_pairs in buckets.items():
-            if other_em == emotion:
-                continue
-            for ctx_ids, rsp_ids in other_pairs[:50]:
-                neg_texts.append(tokenizer.decode(
-                    rsp_ids.tolist(), skip_special_tokens=True))
-        neg_vecs = encode_utterances(eval_model, neg_texts, tokenizer, device)
-        all_rsp  = np.concatenate([rsp_vecs, neg_vecs], axis=0)
-
-        metrics = retrieval_metrics(
-            ctx_vecs, rsp_vecs, all_rsp,
-            n_cands=min(n_candidates, len(all_rsp)))
-
-        per_emotion[emotion] = metrics
-        for k, v in metrics.items():
-            macro[k].append(v)
-
-        if verbose:
-            print(f"  {emotion:20s}  R@1={metrics['R@1']:.3f}  "
-                  f"R@2={metrics['R@2']:.3f}  MRR={metrics['MRR']:.3f}")
-
-        # Free adapted model if we made a copy
-        if adapt and eval_model is not model:
-            del eval_model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    macro_avg = {k: float(np.mean(v)) for k, v in macro.items()}
-    return {'per_emotion': per_emotion, 'macro': macro_avg}
-
-
-def _adapt_on_pairs(model, pairs, tokenizer, device,
-                    n_steps, lr, pad_id):
-    """Adapt encoder directly on (ctx_tensor, rsp_tensor) pairs."""
+def _adapt_on_pairs(model, pairs, pad_id, device, n_steps, lr):
+    """Adapt a copy of model on (ctx_tensor, rsp_tensor) pairs via InfoNCE."""
     from torch.nn.utils.rnn import pad_sequence
 
     adapted = copy.deepcopy(model).to(device)
     opt     = torch.optim.SGD(adapted.parameters(), lr=lr)
     adapted.train()
 
-    def collate(ps):
+    def _collate(ps):
         ctx_list, rsp_list = zip(*ps)
         ctx = pad_sequence(ctx_list, batch_first=True, padding_value=pad_id)
         rsp = pad_sequence(rsp_list, batch_first=True, padding_value=pad_id)
         return (ctx.to(device), rsp.to(device),
-                (ctx==pad_id).to(device), (rsp==pad_id).to(device))
+                (ctx == pad_id).to(device),
+                (rsp == pad_id).to(device))
 
     for _ in range(n_steps):
-        batch = pairs if len(pairs) <= 32 else random.sample(pairs, 32)
-        ctx, rsp, mc, mr = collate(batch)
-        c_t, z_t = adapted(ctx, rsp, mc, mr)
-        c_t = F.normalize(c_t, dim=-1)
-        z_t = F.normalize(z_t, dim=-1)
-        score = torch.mm(c_t, z_t.t())
-        loss  = -torch.mean(torch.diag(F.log_softmax(score, dim=1)))
+        batch       = pairs if len(pairs) <= 32 else random.sample(pairs, 32)
+        ctx, rsp, mc, mr = _collate(batch)
+        c_t, z_t    = adapted(ctx, rsp, mc, mr)
+        c_t         = F.normalize(c_t, dim=-1)
+        z_t         = F.normalize(z_t, dim=-1)
+        score       = torch.mm(c_t, z_t.t())
+        loss        = -torch.mean(torch.diag(F.log_softmax(score, dim=1)))
         opt.zero_grad(); loss.backward(); opt.step()
 
     adapted.eval()
@@ -238,86 +128,141 @@ def _adapt_on_pairs(model, pairs, tokenizer, device,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Full three-condition comparison
+# Per-emotion evaluation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def evaluate_all_conditions(
-    moml_ckpt_path:  str,
-    pretrain_ckpt:   str,
-    test_ds,
-    tokenizer,
-    vocab_size:      int,
-    device:          str,
-    n_candidates:    int   = 100,
-    n_support:       int   = 50,
-    n_inner_steps:   int   = 5,
-    lr_inner:        float = 1e-2,
-) -> dict:
+def evaluate_one_condition(model, test_ds, tokenizer, device,
+                            n_candidates=100, n_support=50,
+                            n_inner_steps=5, lr_inner=1e-2,
+                            adapt=False, verbose=True):
     """
-    Run all three conditions and return results dict.
+    Evaluate one encoder condition on all emotions in test_ds.
+    adapt=True  → adapt on n_support pairs before measuring.
+    adapt=False → use encoder as-is.
+    Returns {per_emotion: {...}, macro: {...}}.
     """
+    if not hasattr(test_ds, 'pairs_by_emotion'):
+        raise ValueError("test_ds must be EmotionAwareDataset")
+
+    buckets  = test_ds.pairs_by_emotion()
+    pad_id   = test_ds.pad_id
+    macro    = defaultdict(list)
+    per_em   = {}
+
+    # Build a global negative pool (all responses from all emotions)
+    all_rsp_texts = []
+    for pairs in buckets.values():
+        for _, rsp_ids in pairs[:30]:
+            all_rsp_texts.append(
+                tokenizer.decode(rsp_ids.tolist(), skip_special_tokens=True))
+
+    # Encode negative pool once with the base model
+    # (re-encoding per condition happens inside the loop when adapt=True)
+    neg_vecs_base = encode_utterances(model, all_rsp_texts, tokenizer, device)
+
+    for emotion, pairs in buckets.items():
+        if len(pairs) < n_support + 10:
+            continue
+
+        random.shuffle(pairs)
+        support = pairs[:n_support]
+        query   = pairs[n_support:n_support + 200]   # cap for speed
+
+        # ── Optional adaptation ───────────────────────────────────────────────
+        if adapt and len(support) >= 4:
+            eval_model = _adapt_on_pairs(
+                model, support, pad_id, device, n_inner_steps, lr_inner)
+        else:
+            eval_model = model
+
+        # ── Encode query pairs ────────────────────────────────────────────────
+        ctx_texts = [tokenizer.decode(c.tolist(), skip_special_tokens=True)
+                     for c, _ in query]
+        rsp_texts = [tokenizer.decode(r.tolist(), skip_special_tokens=True)
+                     for _, r in query]
+
+        ctx_vecs = encode_utterances(eval_model, ctx_texts, tokenizer, device)
+        rsp_vecs = encode_utterances(eval_model, rsp_texts, tokenizer, device)
+
+        # Use base neg pool if not adapted, re-encode if adapted
+        if adapt and eval_model is not model:
+            neg_vecs = encode_utterances(eval_model, all_rsp_texts,
+                                         tokenizer, device)
+        else:
+            neg_vecs = neg_vecs_base
+
+        all_rsp  = np.concatenate([rsp_vecs, neg_vecs], axis=0)
+        metrics  = retrieval_metrics(ctx_vecs, rsp_vecs, all_rsp,
+                                     n_cands=min(n_candidates, len(all_rsp)))
+        per_em[emotion] = metrics
+        for k, v in metrics.items():
+            macro[k].append(v)
+
+        if verbose:
+            print(f"  {emotion:20s}  R@1={metrics['R@1']:.3f}  "
+                  f"MRR={metrics['MRR']:.3f}")
+
+        if adapt and eval_model is not model:
+            del eval_model
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    return {'per_emotion': per_em,
+            'macro': {k: float(np.mean(v)) for k, v in macro.items()}}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Full five-condition comparison
+# ─────────────────────────────────────────────────────────────────────────────
+
+def evaluate_all_conditions(moml_ckpt_path, pretrain_ckpt, test_ds,
+                             tokenizer, vocab_size, device,
+                             n_candidates=100, n_support=50,
+                             n_inner_steps=5, lr_inner=1e-2):
     from v7_02.s1.cog_arch.encoder import DMIScratchEncoder
 
-    def _load_encoder(ckpt_path, vocab_size, device):
-        ckpt  = torch.load(ckpt_path, map_location=device)
+    def _load(path, vocab_size, device):
+        ckpt  = torch.load(path, map_location=device)
         cfg   = ckpt.get('cfg', {})
         model = DMIScratchEncoder(
-            vocab_size       = ckpt.get('vocab_size', vocab_size),
-            d_model          = cfg.get('d_model', 256),
-            projection_size  = cfg.get('projection_size', 256),
-            encoder_layers   = cfg.get('encoder_layers', 4),
-            encoder_heads    = cfg.get('encoder_heads', 4),
-            dim_feedforward  = cfg.get('dim_feedforward', 1024),
-            dropout          = cfg.get('dropout', 0.1),
+            vocab_size      = ckpt.get('vocab_size', vocab_size),
+            d_model         = cfg.get('d_model', 256),
+            projection_size = cfg.get('projection_size', 256),
+            encoder_layers  = cfg.get('encoder_layers', 4),
+            encoder_heads   = cfg.get('encoder_heads', 4),
+            dim_feedforward = cfg.get('dim_feedforward', 1024),
+            dropout         = cfg.get('dropout', 0.1),
         ).to(device)
         if 'model_state_dict' in ckpt:
             model.load_state_dict(ckpt['model_state_dict'])
         return model
 
+    kw = dict(test_ds=test_ds, tokenizer=tokenizer, device=device,
+              n_candidates=n_candidates, n_support=n_support,
+              n_inner_steps=n_inner_steps, lr_inner=lr_inner)
     results = {}
-    kw = dict(
-        test_ds      = test_ds,
-        tokenizer    = tokenizer,
-        device       = device,
-        n_candidates = n_candidates,
-        n_support    = n_support,
-        n_inner_steps= n_inner_steps,
-        lr_inner     = lr_inner,
-    )
 
-    # ── A: Random init (no training, no adaptation) ───────────────────────────
-    print("\n── Condition A: Random init (no adaptation) ──")
-    rand_model = DMIScratchEncoder(
-        vocab_size=vocab_size, d_model=256, projection_size=256,
-        encoder_layers=4, encoder_heads=4, dim_feedforward=1024,
-    ).to(device)
-    results['A_random'] = evaluate_one_condition(
-        rand_model, adapt=False, **kw)
-    del rand_model; torch.cuda.empty_cache()
+    print("\n── A: Random init (no adapt) ──")
+    rand_model = DMIScratchEncoder(vocab_size=vocab_size, d_model=256,
+        projection_size=256, encoder_layers=4, encoder_heads=4,
+        dim_feedforward=1024).to(device)
+    results['A_random'] = evaluate_one_condition(rand_model, adapt=False, **kw)
+    del rand_model; torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-    # ── B: Pretrain only (static, no adaptation) ──────────────────────────────
-    print("\n── Condition B: Pretrain only (no adaptation) ──")
-    pretrain_model = _load_encoder(pretrain_ckpt, vocab_size, device)
-    results['B_pretrain_static'] = evaluate_one_condition(
-        pretrain_model, adapt=False, **kw)
+    print("\n── B: Pretrain static (no adapt) ──")
+    pt = _load(pretrain_ckpt, vocab_size, device)
+    results['B_pretrain_static']  = evaluate_one_condition(pt, adapt=False, **kw)
 
-    # ── B+: Pretrain + adaptation (is adaptation itself helpful?) ─────────────
-    print("\n── Condition B+: Pretrain + adaptation ──")
-    results['B_pretrain_adapted'] = evaluate_one_condition(
-        pretrain_model, adapt=True, **kw)
-    del pretrain_model; torch.cuda.empty_cache()
+    print("\n── B+: Pretrain + adapt ──")
+    results['B_pretrain_adapted'] = evaluate_one_condition(pt, adapt=True,  **kw)
+    del pt; torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-    # ── C: MOML init + adaptation ─────────────────────────────────────────────
-    print("\n── Condition C: MOML init + adaptation ──")
-    moml_model = _load_encoder(moml_ckpt_path, vocab_size, device)
-    results['C_moml_adapted'] = evaluate_one_condition(
-        moml_model, adapt=True, **kw)
+    print("\n── C: MOML static (no adapt) ──")
+    mm = _load(moml_ckpt_path, vocab_size, device)
+    results['C_moml_static']  = evaluate_one_condition(mm, adapt=False, **kw)
 
-    # ── C_static: MOML init without adaptation ────────────────────────────────
-    print("\n── Condition C_static: MOML init (no adaptation) ──")
-    results['C_moml_static'] = evaluate_one_condition(
-        moml_model, adapt=False, **kw)
-    del moml_model; torch.cuda.empty_cache()
+    print("\n── C*: MOML + adapt ──")
+    results['C_moml_adapted'] = evaluate_one_condition(mm, adapt=True,  **kw)
+    del mm; torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     return results
 
@@ -326,42 +271,30 @@ def evaluate_all_conditions(
 # Pretty printer
 # ─────────────────────────────────────────────────────────────────────────────
 
-def print_results(results: dict):
-    """Print a clean comparison table."""
+def print_results(results):
     labels = {
-        'A_random':           'A  Random init          (no adapt)',
-        'B_pretrain_static':  'B  Pretrain static      (no adapt)',
-        'B_pretrain_adapted': 'B+ Pretrain + adapt',
-        'C_moml_static':      'C  MOML static          (no adapt)',
-        'C_moml_adapted':     'C* MOML + adapt         ← target',
+        'A_random':           'A   Random init          (no adapt)',
+        'B_pretrain_static':  'B   Pretrain static      (no adapt)',
+        'B_pretrain_adapted': 'B+  Pretrain + adapt',
+        'C_moml_static':      'C   MOML static          (no adapt)',
+        'C_moml_adapted':     'C*  MOML + adapt         ← target',
     }
-
-    header = f"{'Condition':<42}  {'R@1':>6}  {'R@2':>6}  {'R@5':>6}  {'MRR':>6}"
-    print("\n" + "="*len(header))
-    print(header)
-    print("="*len(header))
-
+    hdr = f"{'Condition':<42}  {'R@1':>6}  {'R@2':>6}  {'R@5':>6}  {'MRR':>6}"
+    print("\n" + "="*len(hdr))
+    print(hdr)
+    print("="*len(hdr))
     for key, label in labels.items():
-        if key not in results:
-            continue
+        if key not in results: continue
         m = results[key]['macro']
-        print(f"{label:<42}  "
-              f"{m['R@1']:>6.3f}  "
-              f"{m['R@2']:>6.3f}  "
-              f"{m['R@5']:>6.3f}  "
-              f"{m['MRR']:>6.3f}")
+        print(f"{label:<42}  {m['R@1']:>6.3f}  {m['R@2']:>6.3f}  "
+              f"{m['R@5']:>6.3f}  {m['MRR']:>6.3f}")
+    print("="*len(hdr))
 
-    print("="*len(header))
-
-    # Highlight MOML gain over pretrain+adapt
     if 'C_moml_adapted' in results and 'B_pretrain_adapted' in results:
         delta = (results['C_moml_adapted']['macro']['R@1'] -
                  results['B_pretrain_adapted']['macro']['R@1'])
         sign  = '+' if delta >= 0 else ''
         print(f"\n  MOML gain over pretrain+adapt  ΔR@1 = {sign}{delta:.3f}")
-        if delta > 0.01:
-            print("  ✓ MOML meta-initialization is beneficial.")
-        elif delta > -0.01:
-            print("  ~ MOML and pretrain+adapt are equivalent.")
-        else:
-            print("  ✗ MOML init hurts — check meta-training quality.")
+        if   delta >  0.01: print("  ✓ MOML meta-initialization is beneficial.")
+        elif delta > -0.01: print("  ~ MOML and pretrain+adapt are equivalent.")
+        else:               print("  ✗ MOML init hurts — check meta-training.")
