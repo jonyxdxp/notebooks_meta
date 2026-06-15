@@ -124,7 +124,7 @@ class DMIScratchEncoder(nn.Module):
         # Linear projection on the response side only (matches DMI's Projection)
         self.proj = nn.Sequential(
             nn.Linear(d_model, projection_size, bias=False),
-            nn.BatchNorm1d(projection_size),
+            nn.BatchNorm1d(projection_size, track_running_stats=False),
         )
 
         self._reset_parameters()
@@ -166,7 +166,7 @@ class DMIScratchEncoder(nn.Module):
 #                  inlined here so this file is self-contained)
 # ─────────────────────────────────────────────────────────────
 
-def infonce_loss(c_t, z_t, temperature=0.07, symmetric=False):
+def infonce_loss(c_t, z_t, temperature=0.05, symmetric=False):
     # Vectors already normalized — dot product = cosine similarity
     score   = torch.mm(c_t, z_t.t()) / temperature
     log_p   = F.log_softmax(score, dim=1)
@@ -176,7 +176,7 @@ def infonce_loss(c_t, z_t, temperature=0.07, symmetric=False):
                  -0.5 * torch.mean(torch.diag(log_p0))
     else:
         loss = -torch.mean(torch.diag(log_p))
-    mi = math.log(c_t.shape[0]) - loss.item() * temperature
+    mi = math.log(c_t.shape[0]) - loss.item()   # remove * temperature
     return score, loss, mi
 
 
