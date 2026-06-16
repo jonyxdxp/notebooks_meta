@@ -166,7 +166,7 @@ class DMIScratchEncoder(nn.Module):
 #                  inlined here so this file is self-contained)
 # ─────────────────────────────────────────────────────────────
 
-def infonce_loss(c_t, z_t, temperature=0.05, symmetric=False):
+def infonce_loss(c_t, z_t, temperature=0.1, symmetric=False):
     # Vectors already normalized — dot product = cosine similarity
     score   = torch.mm(c_t, z_t.t()) / temperature
     log_p   = F.log_softmax(score, dim=1)
