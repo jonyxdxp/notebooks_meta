@@ -40,9 +40,9 @@ from transformers import BlenderbotTokenizer, BertTokenizerFast, RobertaTokenize
 from transformers import get_linear_schedule_with_warmup
 # from rezero.transformer import RZTXEncoderLayer
 
-from models import SMI, is_ddp_module, WrappedSMI
+from v7_01.s1.cog_arch.encoder import SMI, is_ddp_module, WrappedSMI
 from utils import GEN_UNIQ_RUN_ID, pprint_args
-from datautils import DialogData, RMaxData
+from v7_01.s1.data.dataset import DialogData, RMaxData
 
 # =============================== DDP ====================================
 # DDP Guides:

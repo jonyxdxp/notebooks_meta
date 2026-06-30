@@ -38,14 +38,14 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, V6)
 
 # v6-specific imports
-from v6.s2.config        import cfg
-from v6.s2.cog_arch.dm  import DialogueJEPAPredictor
-from v6.prior_encoder    import DynamicsHead, LearnedGoalPrior, bjepa_goal_loss
+from v6_02.s2.config        import cfg
+from v6_02.s2.cog_arch.dm  import DialogueJEPAPredictor
+from v6_02.prior_encoder    import DynamicsHead, LearnedGoalPrior, bjepa_goal_loss
 
 # v6 data — adjust import to match your actual data.py
 # Expected collate output: ctx (B, max_turns, 768), tgt (B, 768),
 #                          mask (B, max_turns) bool, lens (B,)
-from v6.s2.data.data import make_dataloaders   # adapt name if different
+from v6_02.s2.data.data import make_dataloaders   # adapt name if different
 
 print(f'Device: {DEVICE}')
 print(f'Hidden dim (d_input): {cfg.d_input}')   # should print 768

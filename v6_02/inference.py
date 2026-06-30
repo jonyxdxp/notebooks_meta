@@ -31,14 +31,14 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 sys.path.insert(0, ROOT)
 sys.path.insert(0, V6)
 
-from v6.s2.config       import cfg
-from v6.s2.cog_arch.dm  import DialogueJEPAPredictor
-from v6.s2.encoder      import encode_single          # BERT/DMI 768-d
-from v6.prior_encoder   import DynamicsHead, LearnedGoalPrior
-from v6.s3.cog_arch.decoder import SingleTurnDecoderNew as Decoder
+from v6_02.s2.config       import cfg
+from v6_02.s2.cog_arch.dm  import DialogueJEPAPredictor
+from v6_02.s2.encoder      import encode_single          # BERT/DMI 768-d
+from v6_02.prior_encoder   import DynamicsHead, LearnedGoalPrior
+from v6_02.s3.cog_arch.decoder import SingleTurnDecoderNew as Decoder
 
 # v6 data loader (for batch-level eval)
-from v6.s2.data.data import make_dataloaders
+from v6_02.s2.data.data import make_dataloaders
 
 print(f'Device: {DEVICE}')
 

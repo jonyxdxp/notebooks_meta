@@ -48,14 +48,14 @@ import torch.nn.functional as F
 
 # ── robust import of test_time_adapt regardless of working directory ──────────
 try:
-    from v7_02.s1.adapt.test_time_adapt import encode_utterances
+    from v7_02.s1.utils.test_time_adapt import encode_utterances
 except ModuleNotFoundError:
     # Fallback: add repo root to path and try again
     _here = os.path.dirname(os.path.abspath(__file__))          # .../eval/
     _root = os.path.dirname(os.path.dirname(os.path.dirname(_here)))  # repo root
     if _root not in sys.path:
         sys.path.insert(0, _root)
-    from v7_02.s1.adapt.test_time_adapt import encode_utterances
+    from v7_02.s1.utils.test_time_adapt import encode_utterances
 
 
 # ─────────────────────────────────────────────────────────────────────────────
